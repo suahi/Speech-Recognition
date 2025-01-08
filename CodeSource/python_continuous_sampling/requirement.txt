@@ -1,0 +1,32 @@
+# Numerical and Scientific Computing
+numpy
+scikit-learn
+matplotlib
+
+# Audio Processing
+librosa
+wave
+
+# Deep Learning
+torch
+torchvision
+
+# IoT Database
+iotdb
+
+# Custom Modules (if applicable)
+GetSampleDataAndSave
+inference
+in_iotdb
+getqueuelen
+dataset
+audiomodel
+SaveWavFile
+
+# others
+numpy
+torch
+scikit-learn
+torchvision
+matplotlib
+librosa
