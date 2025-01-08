@@ -11,17 +11,10 @@ wave
 torch
 torchvision
 
-# IoT Database
-iotdb
+# IoT Database 
+apache-iotdb
 
-# Custom Modules (if applicable)
-GetSampleDataAndSave
-inference
-in_iotdb
-getqueuelen
-dataset
-audiomodel
-SaveWavFile
+
 
 # others
 numpy

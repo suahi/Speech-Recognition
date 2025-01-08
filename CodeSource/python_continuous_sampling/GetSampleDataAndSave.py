@@ -1,7 +1,7 @@
 from ctypes import *
 from SaveWavFile import SaveWavFile
 
-vk701n = cdll.LoadLibrary('./VK70xNMC_DAQ2.dll')
+vk701n = cdll.LoadLibrary('libVK70XNMC_DAQ_SHARED.so')
 GetFourChannelWithIOStatus = vk701n.VK70xNMC_GetFourChannel_WithIOStatus
 GetFourChannelWithIOStatus.argtypes = [c_int, POINTER(c_double), c_int, c_int]
 GetFourChannelWithIOStatus.restypes =c_int
