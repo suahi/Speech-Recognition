@@ -38,6 +38,8 @@ in_iotdb(predicted, confidences, timestamp_element, raw_datas, real, imaginary)
 
 ### 1、换一台电脑可能就无法读取到IP地址
 
- # 获取当前 DAQ 的句柄和 IP 地址
+```
+# 获取当前 DAQ 的句柄和 IP 地址
 print("获取当前 DAQ 的句柄和 IP 地址...")
 result = GetConnectedClientHandle(deviceNo, byref(curHandle), ipAdr)
+```
