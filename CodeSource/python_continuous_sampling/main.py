@@ -21,7 +21,7 @@ from in_iotdb import in_iotdb  # 导入 IoT 数据库模块，用于将数据存
 
 # 加载 64 位 DLL 库
 #vk701n = cdll.LoadLibrary('./VK70xNMC_DAQ2.dll')
-vk701n = cdll.LoadLibrary('/home/huanowine/Desktop/OilStream/OilStream/CodeSource/python_continuous_sampling/libVK70XNMC_DAQ_SHARED.so')
+vk701n = cdll.LoadLibrary('libVK70XNMC_DAQ_SHARED.so')
 # 打开 TCP 服务器
 TCPOpen = vk701n.Server_TCPOpen
 TCPOpen.argtypes = [c_int]      # 定义函数参数类型为整数
