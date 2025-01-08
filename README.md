@@ -21,7 +21,7 @@
 
 [3. 系统镜像烧录 — 快速使用手册—基于LubanCat-RK356x系列板卡 文档](https://doc.embedfire.com/linux/rk356x/quick_start/zh/latest/quick_start/flash_img/flash_img.html)
 
-### 2、VK70xNMC_DAQ2.dll -> VK70xNMC_DAQ2.so
+### 2、VK70xNMC_DAQ2.dll -> VK70xNMC_DAQ2.so  （已完成 feature/python-with-so 完成 VK70xNMC_DAQ2.so 的X86平台编译 #1）
 
     需要VK70xNMC_DAQ2.c（已提供，makefile 确认要加上编译选型 -fPIC -shared）
 
