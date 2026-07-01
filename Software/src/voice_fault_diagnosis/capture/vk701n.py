@@ -70,6 +70,19 @@ class CtypesVk701nSdk:
             ctypes.c_int,
         ]
         self._dll.VK70xNMC_InitializeAll.restype = ctypes.c_int
+        self._has_initialize = hasattr(self._dll, "VK70xNMC_Initialize")
+        if self._has_initialize:
+            self._dll.VK70xNMC_Initialize.argtypes = [
+                ctypes.c_int,
+                ctypes.c_double,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+            ]
+            self._dll.VK70xNMC_Initialize.restype = ctypes.c_int
         self._dll.VK70xNMC_Set_BlockingMethodtoReadADCResult.argtypes = [
             ctypes.c_int,
             ctypes.c_int,
@@ -129,6 +142,36 @@ class CtypesVk701nSdk:
         with self._sdk_working_directory():
             return int(self._dll.VK70xNMC_InitializeAll(int(device_no), param_array, len(params)))
 
+    def has_initialize(self) -> bool:
+        return bool(self._has_initialize)
+
+    def initialize(
+        self,
+        device_no: int,
+        ref_voltage: float,
+        bit_mode: int,
+        sample_rate: int,
+        range_ch1: int,
+        range_ch2: int,
+        range_ch3: int,
+        range_ch4: int,
+    ) -> int:
+        if not self._has_initialize:
+            raise AttributeError("VK70xNMC_Initialize is not exported by this SDK")
+        with self._sdk_working_directory():
+            return int(
+                self._dll.VK70xNMC_Initialize(
+                    int(device_no),
+                    float(ref_voltage),
+                    int(bit_mode),
+                    int(sample_rate),
+                    int(range_ch1),
+                    int(range_ch2),
+                    int(range_ch3),
+                    int(range_ch4),
+                )
+            )
+
     def set_blocking_method(self, mode: int, timeout_ms: int) -> int:
         with self._sdk_working_directory():
             return int(
@@ -162,10 +205,20 @@ class Vk701nCaptureSession:
         self._library_path: Path | None = None
         self._buffer: Any | None = None
         self._buffer_capacity = 0
+        self._preflight_stop_sampling_status: int | str | None = None
+        self._preflight_tcp_close_status: int | str | None = None
+        self._startup_profile = ""
+        self._startup_attempts: list[dict[str, Any]] = []
+        self._startup_health_recv_lengths: list[int] = []
+        self._active_initialize_method = ""
+        self._active_initialize_params: list[int] | dict[str, Any] | None = None
 
     def start(self) -> dict[str, Any]:
         sdk = self._ensure_sdk()
+        self._reset_start_state()
         cfg = self.config
+        self._startup_profile = str(cfg.initialize_all_profile or "windows_c_example")
+        self._preflight_cleanup(sdk)
         self._check("open TCP server", sdk.server_tcp_open(cfg.server_port), allow_positive=True)
         self._server_open = True
         self._wait_for_device(sdk)
@@ -176,10 +229,14 @@ class Vk701nCaptureSession:
         self._device_ip = ip
 
         self._check("set system mode", sdk.set_system_mode(cfg.device_no, 0, 0, 0))
-        self._check("initialize all", sdk.initialize_all(cfg.device_no, self._initialize_all_params()))
+        self._initialize_device(sdk)
         self._check("set blocking read", sdk.set_blocking_method(1, cfg.blocking_timeout_ms))
+        if cfg.post_initialize_delay_s > 0:
+            time.sleep(float(cfg.post_initialize_delay_s))
         self._check("start sampling", sdk.start_sampling(cfg.device_no))
         self._sampling_started = True
+        if cfg.post_start_delay_s > 0:
+            time.sleep(float(cfg.post_start_delay_s))
         return self.runtime_metadata()
 
     def stop(self) -> None:
@@ -236,7 +293,7 @@ class Vk701nCaptureSession:
                         f"zero_read_count={zero_read_count}, "
                         f"last_recv_lengths={last_recv_lengths[-20:]}, "
                         f"range_code={self._input_range_code()}, "
-                        f"initialize_all_params={self._initialize_all_params()}"
+                        f"initialize_params={self._active_initialize_params}"
                     )
 
                 recv_len, voltage = self.read_voltage_chunk(cfg.read_frame_count)
@@ -338,7 +395,7 @@ class Vk701nCaptureSession:
 
     def runtime_metadata(self) -> dict[str, Any]:
         range_code = self._input_range_code()
-        initialize_params = self._initialize_all_params()
+        initialize_params = self._active_initialize_params or self._initialize_all_params()
         return {
             "sdk_library_path": str(self._library_path or self.config.sdk_library_path or ""),
             "server_port": int(self.config.server_port),
@@ -354,8 +411,18 @@ class Vk701nCaptureSession:
             "blocking_timeout_ms": int(self.config.blocking_timeout_ms),
             "input_range_volts": float(self.config.input_range_volts),
             "range_code": int(range_code),
-            "initialize_method": "VK70xNMC_InitializeAll",
+            "startup_profile": self._startup_profile,
+            "startup_health_recv_lengths": list(self._startup_health_recv_lengths),
+            "startup_attempts": list(self._startup_attempts),
+            "initialize_method": self._active_initialize_method or "VK70xNMC_InitializeAll",
             "initialize_all_params": initialize_params,
+            "active_initialize_params": initialize_params,
+            "preflight_cleanup_enabled": bool(self.config.preflight_cleanup),
+            "preflight_stop_sampling_status": self._preflight_stop_sampling_status,
+            "preflight_tcp_close_status": self._preflight_tcp_close_status,
+            "preflight_cleanup_delay_s": float(self.config.preflight_cleanup_delay_s),
+            "post_initialize_delay_s": float(self.config.post_initialize_delay_s),
+            "post_start_delay_s": float(self.config.post_start_delay_s),
         }
 
     def _ensure_sdk(self) -> Any:
@@ -384,6 +451,27 @@ class Vk701nCaptureSession:
     def _initialize_all_params(self) -> list[int]:
         cfg = self.config
         range_code = self._input_range_code()
+        profile = str(cfg.initialize_all_profile or "code_source").strip().lower()
+        if profile in {"code_source", "legacy", "legacy_code_source"}:
+            return [
+                int(cfg.sample_rate),
+                4,
+                int(cfg.bit_mode),
+                int(cfg.sample_rate),
+                range_code,
+                range_code,
+                range_code,
+                range_code,
+                1,
+                1,
+                1,
+                1,
+            ]
+        if profile not in {"fixed", "fixed_initialize_all"}:
+            raise Vk701nError(
+                "unsupported initialize_all_profile="
+                f"{cfg.initialize_all_profile!r}; supported: code_source, fixed"
+            )
         return [
             int(cfg.sample_rate),
             4,
@@ -398,6 +486,82 @@ class Vk701nCaptureSession:
             0,
             0,
         ]
+
+    def _initialize_device(self, sdk: Any) -> None:
+        cfg = self.config
+        profile = str(cfg.initialize_all_profile or "windows_c_example").strip().lower()
+        if profile in {"windows_c_example", "windows_initialize", "initialize"}:
+            if not self._sdk_has_initialize(sdk):
+                raise Vk701nError("VK70xNMC_Initialize is not exported by this SDK")
+            params = {
+                "ref_voltage": 4.0,
+                "bit_mode": 1,
+                "sample_rate": int(cfg.sample_rate),
+                "range_ch1": 0,
+                "range_ch2": 0,
+                "range_ch3": 0,
+                "range_ch4": 0,
+            }
+            self._active_initialize_method = "VK70xNMC_Initialize"
+            self._active_initialize_params = dict(params)
+            self._check(
+                "initialize windows C example",
+                sdk.initialize(
+                    cfg.device_no,
+                    params["ref_voltage"],
+                    params["bit_mode"],
+                    params["sample_rate"],
+                    params["range_ch1"],
+                    params["range_ch2"],
+                    params["range_ch3"],
+                    params["range_ch4"],
+                ),
+            )
+            return
+
+        params = self._initialize_all_params()
+        self._active_initialize_method = "VK70xNMC_InitializeAll"
+        self._active_initialize_params = list(params)
+        self._check("initialize all", sdk.initialize_all(cfg.device_no, params))
+
+    @staticmethod
+    def _sdk_has_initialize(sdk: Any) -> bool:
+        if hasattr(sdk, "has_initialize"):
+            return bool(sdk.has_initialize())
+        return hasattr(sdk, "initialize")
+
+    def _reset_start_state(self) -> None:
+        self._device_ip = ""
+        self._device_handle = None
+        self._preflight_stop_sampling_status = None
+        self._preflight_tcp_close_status = None
+        self._startup_profile = ""
+        self._startup_attempts = []
+        self._startup_health_recv_lengths = []
+        self._active_initialize_method = ""
+        self._active_initialize_params = None
+
+    def _preflight_cleanup(self, sdk: Any) -> None:
+        cfg = self.config
+        if not cfg.preflight_cleanup:
+            return
+        self._preflight_stop_sampling_status = self._safe_sdk_cleanup_call(
+            "stop_sampling",
+            lambda: sdk.stop_sampling(cfg.device_no),
+        )
+        self._preflight_tcp_close_status = self._safe_sdk_cleanup_call(
+            "server_tcp_close",
+            lambda: sdk.server_tcp_close(cfg.server_port),
+        )
+        if cfg.preflight_cleanup_delay_s > 0:
+            time.sleep(float(cfg.preflight_cleanup_delay_s))
+
+    @staticmethod
+    def _safe_sdk_cleanup_call(action: str, call: Callable[[], int]) -> int | str:
+        try:
+            return int(call())
+        except Exception as exc:  # pragma: no cover - defensive against vendor DLL edge cases.
+            return f"{action} exception: {type(exc).__name__}: {exc}"
 
     def _input_range_code(self) -> int:
         range_map = {

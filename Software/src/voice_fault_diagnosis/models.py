@@ -20,6 +20,11 @@ class HardwareConfig:
     connect_timeout_s: float = 10.0
     zero_read_timeout_s: float = 30.0
     poll_interval_s: float = 0.01
+    preflight_cleanup: bool = False
+    preflight_cleanup_delay_s: float = 0.5
+    initialize_all_profile: str = "windows_c_example"
+    post_initialize_delay_s: float = 1.0
+    post_start_delay_s: float = 0.1
     input_range_volts: float = 5.0
     capture_seconds: float = 10.0
 

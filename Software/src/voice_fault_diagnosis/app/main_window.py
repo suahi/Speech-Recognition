@@ -11,6 +11,7 @@ try:
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
+        QComboBox,
         QDoubleSpinBox,
         QFileDialog,
         QFormLayout,
@@ -182,6 +183,7 @@ class MainWindow(QMainWindow):
         self.active_sample_rate = 50000
         self.active_input_range_volts = 5.0
         self.store = LocalRecordStore()
+        self._hardware_config_path = CONFIG_DIR / "hardware_vk701n.json"
 
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
@@ -199,7 +201,7 @@ class MainWindow(QMainWindow):
         group = QGroupBox("VK701N-SD 硬件设置")
         form = QFormLayout(group)
 
-        cfg = HardwareConfig.from_dict(load_json(CONFIG_DIR / "hardware_vk701n.json", {}))
+        cfg = HardwareConfig.from_dict(load_json(self._hardware_config_path, {}))
         sdk_default = cfg.sdk_library_path or str(resolve_sdk_library(""))
         self.sdk_path = QLineEdit(sdk_default)
         browse = QPushButton("选择 SDK")
@@ -218,6 +220,12 @@ class MainWindow(QMainWindow):
         self.gain_spin = _double_spin(cfg.gain, 0.001, 100.0, 3)
         self.blocking_spin = _spin(cfg.blocking_timeout_ms, 1, 10000)
         self.capture_seconds_spin = _double_spin(cfg.capture_seconds, 0.1, 3600.0, 1)
+        self.initialize_profile_combo = QComboBox()
+        self.initialize_profile_combo.addItems(["windows_c_example", "code_source", "fixed"])
+        initialize_profile = str(cfg.initialize_all_profile or "windows_c_example")
+        if initialize_profile not in {"windows_c_example", "code_source", "fixed"}:
+            initialize_profile = "windows_c_example"
+        self.initialize_profile_combo.setCurrentText(initialize_profile)
         form.addRow("端口", self.port_spin)
         form.addRow("设备号", self.device_spin)
         form.addRow("采样率 Hz", self.sample_rate_spin)
@@ -227,6 +235,7 @@ class MainWindow(QMainWindow):
         form.addRow("旧模型增益", self.gain_spin)
         form.addRow("阻塞超时 ms", self.blocking_spin)
         form.addRow("采集时长 s", self.capture_seconds_spin)
+        form.addRow("初始化布局", self.initialize_profile_combo)
 
         save_button = QPushButton("保存硬件配置")
         save_button.clicked.connect(self._save_hardware_config)
@@ -347,18 +356,23 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(page, "历史记录")
 
     def _hardware_config(self) -> HardwareConfig:
-        return HardwareConfig(
-            sdk_library_path=self.sdk_path.text().strip(),
-            server_port=int(self.port_spin.value()),
-            device_no=int(self.device_spin.value()),
-            adc_channel=int(self.channel_spin.value()),
-            sample_rate=int(self.sample_rate_spin.value()),
-            bit_mode=int(self.bit_mode_spin.value()),
-            read_frame_count=int(self.frame_spin.value()),
-            gain=float(self.gain_spin.value()),
-            blocking_timeout_ms=int(self.blocking_spin.value()),
-            capture_seconds=float(self.capture_seconds_spin.value()),
+        data = load_json(self._hardware_config_path, {})
+        data.update(
+            {
+                "sdk_library_path": self.sdk_path.text().strip(),
+                "server_port": int(self.port_spin.value()),
+                "device_no": int(self.device_spin.value()),
+                "adc_channel": int(self.channel_spin.value()),
+                "sample_rate": int(self.sample_rate_spin.value()),
+                "bit_mode": int(self.bit_mode_spin.value()),
+                "read_frame_count": int(self.frame_spin.value()),
+                "gain": float(self.gain_spin.value()),
+                "blocking_timeout_ms": int(self.blocking_spin.value()),
+                "capture_seconds": float(self.capture_seconds_spin.value()),
+                "initialize_all_profile": self.initialize_profile_combo.currentText(),
+            }
         )
+        return HardwareConfig.from_dict(data)
 
     def _denoise_config(self) -> DenoiseConfig:
         return DenoiseConfig(
@@ -443,6 +457,11 @@ class MainWindow(QMainWindow):
                     f"读取次数: {info.get('read_calls', 0)}",
                     f"累计0读次数: {info.get('zero_read_count', 0)}",
                     f"最近SDK返回: {info.get('last_recv_lengths', [])}",
+                    f"启动Profile: {info.get('startup_profile', '')}",
+                    f"初始化参数: {info.get('initialize_all_params', [])}",
+                    f"预清理: {'开启' if info.get('preflight_cleanup_enabled') else '关闭'}",
+                    f"预清理 StopSampling: {info.get('preflight_stop_sampling_status', '')}",
+                    f"预清理 TCPClose: {info.get('preflight_tcp_close_status', '')}",
                     f"显示模式: {display_mode}",
                     f"均值: {stats.mean_volts:.9f} V",
                     f"交流 RMS: {stats.ac_rms_volts:.9f} V",
@@ -516,7 +535,7 @@ class MainWindow(QMainWindow):
             self.sdk_path.setText(path)
 
     def _save_hardware_config(self) -> None:
-        save_json(CONFIG_DIR / "hardware_vk701n.json", self._hardware_config().to_dict())
+        save_json(self._hardware_config_path, self._hardware_config().to_dict())
         QMessageBox.information(self, "保存完成", "硬件配置已保存。")
 
     def _save_denoise_config(self) -> None:
