@@ -296,7 +296,7 @@ portNum = 8234                                  # TCP 服务器端口号，默�
 curDeviceNum = c_int(0)                         # 当前设备数量，初始化为 0
 deviceNo = 0                                    # 默认设备编号为 0，单个 DAQ 默认值
 curHandle = c_int(0)                            # 当前设备的句柄，初始化为 0
-ipAdr = ctypes.create_string_buffer(0)          # 用于存储 IP 地址的缓冲区，初始化为空
+ipAdr = ctypes.create_string_buffer(64)          # 用于存储 IP 地址的缓冲区，初始化为空
 revResult = (c_double * 200000)()        # 接收数据的缓冲区，最大支持采样频率 * 8 通道
 NumofADCChannel = 4                             # ADC 通道数量
 initPara = (c_int * 12)()                       # 初始化参数数组，长度为 12
@@ -308,7 +308,7 @@ gain = 0.668                                    # 增益系数
 reason_num = 12800                              # 原因编号（用途待定）
 databuff = []                                   # 数据缓冲列表
 timestamp = []                                  # 时间戳列表
-filepath = 'F:/python_continuous_sampling'      # 数据保存路径
+filepath = '/home/cat/oilStream/OilStream/CodeSource/python_continuous_sampling/'      # 数据保存路径
 queueCh1 = queue.Queue()                        # 通道 1 的数据队列
 queueCh2 = queue.Queue()                        # 通道 2 的数据队列
 queueCh3 = queue.Queue()                        # 通道 3 的数据队列
@@ -385,10 +385,10 @@ else:
                         else:
                             print("开始连续采样成功")
 
-# 定义任务函数，用于持续获取采样数据并处理
 def task():
     global isSampling, StopFlag
-    while isSampling:
+    #while isSampling:
+    while True:
         # 获取采样数据并保存，返回采样状态、停止标志、数据元素和时间戳
         isSampling, StopFlag, databuff_element, timestamp_element = GetSampleDataAndSave(
             samplingFrequency, 
@@ -403,168 +403,36 @@ def task():
             queueCh4, 
             filepath
         )
-        if timestamp_element:
+        
+        if databuff_element is not None:
+            # 打印采集到的原始数据
+            print(f"[DEBUG] Raw Data (length={len(databuff_element)}): {databuff_element[:50]}...")  # 只打印前10个数据点以避免过多输出
+            
             # 对采样数据进行推理处理
             predicted, confidences, raw_datas, real, imaginary = inference(databuff_element)
+            
+            # 打印输入到推理模型的数据
+            print(f"[DEBUG] Data before inference (first 10 elements): {raw_datas[:50]}")
+            
+            # 打印推理结果
+            print(f"[DEBUG] Inference result => predicted={predicted}, confidences={confidences}")
+
+            # 打印实部和虚部数据
+            if real is not None and imaginary is not None:
+                print(f"[DEBUG] Real part (first 50 elements): {real[:50]}")
+                print(f"[DEBUG] Imaginary part (first 50 elements): {imaginary[:50]}")
+                print("len123")
+                print(len(imaginary))
+            else:
+                print("[DEBUG] Real and Imaginary parts are not available.")
             # 将推理结果存入 IoT 数据库
             in_iotdb(predicted, confidences, timestamp_element, raw_datas, real, imaginary)
-    if not StopFlag:
-        # 如果停止标志被触发，停止采样
-        StopSampling(deviceNo)
+            #in_iotdb(predicted, confidences, timestamp_element, databuff_element, real, imaginary)
+    # if not StopFlag:
+    #     # 如果停止标志被触发，停止采样
+    #     StopSampling(deviceNo)
 
-# 定义 GetSampleDataAndSave 函数，用于获取采样数据并保存（注释已取消，保留为参考）
-# def GetSampleDataAndSave():
-#     if samplingFrequency > 10:
-#         getPoints = 6400
-#     else:
-#         getPoints = 1
-#     global recvLen
-#     # 从四个通道读取采样数据
-#     recvLen = GetFourChannel(deviceNo, revResult, int(getPoints))
-#     if recvLen > 0:
-#         # 统计每次获取的点数
-#         global totalPointNum
-#         totalPointNum = totalPointNum + recvLen
-#         for i in range(0, recvLen * NumofADCChannel, NumofADCChannel):
-#             if (i % (100 * NumofADCChannel) == 0):
-#                 for j in range(0, NumofADCChannel):
-#                     print(f"CH{j + 1} = {revResult[i + j]:.8f}V, \t", end="")
-#                 print("")
-#         print(
-#             f"总点数为 [{totalPointNum}], 本次获取点数为 [{recvLen}]")
-#         # 创建保存数据的数组及队列
-#         revResultCh1 = (c_double * 50000)()
-#         revResultCh2 = (c_double * 50000)()
-#         revResultCh3 = (c_double * 50000)()
-#         revResultCh4 = (c_double * 50000)()
-#         bufferCh1 = bytearray(150000)
-#         bufferCh2 = bytearray(150000)
-#         bufferCh3 = bytearray(150000)
-#         bufferCh4 = bytearray(150000)
-#
-#         for i in range(recvLen * NumofADCChannel):
-#             a = i % 4
-#             b = i // 4
-#             if a == 0:
-#                 revResultCh1[b] = revResult[i]
-#             elif a == 1:
-#                 revResultCh2[b] = revResult[i]
-#             elif a == 2:
-#                 revResultCh3[b] = revResult[i]
-#             elif a == 3:
-#                 revResultCh4[b] = revResult[i]
-#
-#         for i in range(recvLen):
-#             revResultCh1[i] *= gain
-#             revResultCh1[i] += 5
-#             revResultCh1[i] *= 0.1
-#             if revResultCh1[i] > 1:
-#                 revResultCh1[i] = 1
-#             if revResultCh1[i] < 0:
-#                 revResultCh1[i] = 0
-#             intSample = int(revResultCh1[i] * 8388607)
-#             bufferCh1[3 * i] = intSample & 0x0000ff
-#             bufferCh1[3 * i + 1] = (intSample & 0x00ff00) >> 8
-#             bufferCh1[3 * i + 2] = intSample >> 16
-#         print(len(bufferCh1))
-#         while len(bufferCh1) - 1 > 3 * recvLen - 1:
-#             del bufferCh1[-1]
-#         queueCh1.put(bufferCh1)
-#
-#         for i in range(recvLen):
-#             revResultCh2[i] *= gain
-#             revResultCh2[i] += 5
-#             revResultCh2[i] *= 0.1
-#             if revResultCh2[i] > 1:
-#                 revResultCh2[i] = 1
-#             if revResultCh2[i] < 0:
-#                 revResultCh2[i] = 0
-#             intSample = int(revResultCh2[i] * 8388607)
-#             bufferCh2[3 * i] = intSample & 0x0000ff
-#             bufferCh2[3 * i + 1] = (intSample & 0x00ff00) >> 8
-#             bufferCh2[3 * i + 2] = intSample >> 16
-#         while len(bufferCh1) - 1 > 3 * recvLen - 1:
-#             del bufferCh1[-1]
-#         queueCh2.put(bufferCh2)
-#
-#         for i in range(recvLen):
-#             revResultCh3[i] *= gain
-#             revResultCh3[i] += 5
-#             revResultCh3[i] *= 0.1
-#             if revResultCh3[i] > 1:
-#                 revResultCh3[i] = 1
-#             if revResultCh3[i] < 0:
-#                 revResultCh3[i] = 0
-#             intSample = int(revResultCh3[i] * 8388607)
-#             bufferCh3[3 * i] = intSample & 0x0000ff
-#             bufferCh3[3 * i + 1] = (intSample & 0x00ff00) >> 8
-#             bufferCh3[3 * i + 2] = intSample >> 16
-#         while len(bufferCh1) - 1 > 3 * recvLen - 1:
-#             del bufferCh1[-1]
-#         queueCh3.put(bufferCh3)
-#
-#         for i in range(recvLen):
-#             revResultCh4[i] *= gain
-#             revResultCh4[i] += 5
-#             revResultCh4[i] *= 0.1
-#             if revResultCh4[i] > 1:
-#                 revResultCh4[i] = 1
-#             if revResultCh4[i] < 0:
-#                 revResultCh4[i] = 0
-#             intSample = int(revResultCh4[i] * 8388607)
-#             bufferCh4[3 * i] = intSample & 0x0000ff
-#             bufferCh4[3 * i + 1] = (intSample & 0x00ff00) >> 8
-#             bufferCh4[3 * i + 2] = intSample >> 16
-#         while len(bufferCh1) - 1 > 3 * recvLen - 1:
-#             del bufferCh1[-1]
-#         queueCh4.put(bufferCh4)
-#
-#         SaveWavFile(samplingFrequency)
-#
-#
-# def SaveWavFile(sample_rate):
-#     if getqueuelen(queueCh1) % 12800 == 0:
-#         timestamp.append(time.time())
-#         print(timestamp)
-#
-#     if getqueuelen(queueCh1) >= (saveTimeLengthSec * samplingFrequency * 24 / 8 * 1):
-#         tempfilepath = filepath
-#         tempfilepath += "//"
-#         tempfilepath += "_ch1.wav"
-#         global isSampling
-#         global StopFlag
-#         isSampling = False
-#         StopFlag = False
-#         if not os.path.exists(tempfilepath):
-#             os.system(r"touch {}".format(tempfilepath))
-#         with wave.open(tempfilepath,'wb') as wav_file:
-#             num_channel = 1
-#             sampwidth = 3
-#             num_frame = queueCh1.qsize()
-#
-#             wav_file.setnchannels(num_channel)
-#             wav_file.setsampwidth(sampwidth)
-#             wav_file.setframerate(sample_rate)
-#             wav_file.setnframes(num_frame)
-#
-#             databuff = bytearray()
-#             for array in queueCh1.queue:
-#                 for ii in range(len(array)):
-#                     databuff.append(array[ii])
-#
-#             while True:
-#                 queueCh1.get()
-#                 if queueCh1.empty():
-#                     break
-#             wav_file.writeframes(databuff)
-#             print("采样完成")
-#
-#
-# def getqueuelen(queue1):
-#     arraylen = 0
-#     for array in queue1.queue:
-#         arraylen += len(array)
-#     return arraylen
+
 
 # 检查是否为主程序运行
 if __name__ == '__main__':

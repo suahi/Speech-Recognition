@@ -1,0 +1,14 @@
+.idea/
+**/__pycache__/
+*.pyc
+*.log
+.pytest_cache/
+.pytest_tmp/
+
+Software/data/records/
+CodeSource/python_continuous_sampling/_ch1.wav
+
+**/Debug/
+**/obj/
+**/x64/
+documents/vk70xnmc_linux_library rpi/

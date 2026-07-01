@@ -32,7 +32,8 @@ def dataprocess(raw_bytes, n_fft=1024):
     # 创建数据集
     X = []
 
-    num_samples = len(raw_bytes) // 3  # 每个样本3个字节
+    #num_samples = len(raw_bytes) // 3  # 每个样本3个字节
+    num_samples = len(raw_bytes)  # 每个样本1个字节
 
     sr = 50000  # 采样率50000hz
 
@@ -42,24 +43,30 @@ def dataprocess(raw_bytes, n_fft=1024):
 
     # 解析字节数据为整数样本
     for i in range(num_samples):
-        int_audio_data[i] = (raw_bytes[3 * i] | (raw_bytes[3 * i + 1] << 8) | (raw_bytes[3 * i + 2] << 16)) & 0xFFFFFF  # 掩码确保只有24位有效
+    		int_audio_data[i] = raw_bytes[i]
+#        int_audio_data[i] = (
+#        (raw_bytes[ i] & 0xFFFFFF) | 
+#        ((raw_bytes[i]&0xFF) << 8) | 
+#        ((raw_bytes[i]& 0xFFFF) << 16)
+#         & 0xFFFFFF ) # 掩码确保只有24位有效
+		    # 将整数数组转换为浮点数数组并标准化
+		    # 对于无符号24位整数数据，最大值是2**23 - 1
 
-    # 将整数数组转换为浮点数数组并标准化
-    # 对于无符号24位整数数据，最大值是2**23 - 1
     max_24bit_value = 2 ** 23 - 1
-    y = int_audio_data.astype(np.float32) / max_24bit_value
+    #y = int_audio_data.astype(np.float32) / max_24bit_value
+    y = int_audio_data.astype(np.float32) 
 
     # 计算特征
 
     mfccs = np.mean(librosa.feature.mfcc(y=y, sr=sr, n_mfcc=36, n_fft=n_fft).T, axis=0)
 
     Real_ = np.real(
-        librosa.stft(y, n_fft=1024, hop_length=None, window='hann', center=True,
+        librosa.stft(y, n_fft=128, hop_length=None, window='hann', center=True,
                      pad_mode='reflect'))
 
     Real = Real_.flatten()
     Imaginary_ = np.imag(
-        librosa.stft(y, n_fft=1024, hop_length=None, window='hann', center=True,
+        librosa.stft(y, n_fft=128, hop_length=None, window='hann', center=True,
                      pad_mode='reflect'))
 
     Imaginary = Imaginary_.flatten()

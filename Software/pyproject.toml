@@ -1,0 +1,21 @@
+[project]
+name = "voice-fault-diagnosis"
+version = "0.1.0"
+description = "Local-file acoustic fault diagnosis system for VK701N-SD voiceprint voltage acquisition."
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "scipy",
+    "PyWavelets",
+    "librosa",
+    "torch",
+]
+
+[project.optional-dependencies]
+desktop = ["PySide6"]
+test = ["pytest"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-q --basetemp=.pytest_tmp"

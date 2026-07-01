@@ -1,0 +1,17 @@
+{
+  "sdk_library_path": "D:\\yzy\\02 项目\\202601JY陀螺仪故障检测\\oilStream\\OilStream\\Software\\vendor\\vk701n\\VK70xNMC_DAQ2.dll",
+  "server_port": 8234,
+  "device_no": 0,
+  "adc_channel": 2,
+  "adc_total_channels": 4,
+  "sample_rate": 50000,
+  "bit_mode": 24,
+  "read_frame_count": 5000,
+  "gain": 0.668,
+  "blocking_timeout_ms": 1000,
+  "connect_timeout_s": 10.0,
+  "zero_read_timeout_s": 30.0,
+  "poll_interval_s": 0.01,
+  "input_range_volts": 5.0,
+  "capture_seconds": 100.0
+}

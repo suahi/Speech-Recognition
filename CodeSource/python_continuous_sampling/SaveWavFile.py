@@ -19,7 +19,6 @@ def SaveWavFile(sample_rate, reason_num, queue, saveTimeLengthSec, filepath):
 
     if getqueuelen(queue) >= (saveTimeLengthSec * sample_rate * 24 / 8 * 1):
         tempfilepath = filepath
-        tempfilepath += "//"
         tempfilepath += "_ch1.wav"
         isSampling = False
         StopFlag = False

@@ -13,7 +13,15 @@ from dataset import dataprocess, AudioDataset
 import time
 import torch.nn.functional as F
 import pickle
+from standardizer import (
+    load_initial_mean_std, initialize_buffer, 
+    standardize_data, update_local_buffer, 
+    compute_environment_mean_std, update_model_mean_std
+)
 
+# 全局只做一次：加载模型时，加载初始 mean & std，并初始化本地缓冲
+load_initial_mean_std('mean_std.pkl')  # 第一次加载时执行
+initialize_buffer()
 
 def inference(raw_bytes):
 
@@ -27,23 +35,36 @@ def inference(raw_bytes):
     print("特征提取的执行时间为:", elapsed_time1 * 1000000, "us")
 
     start = time.time()
-    # 转换为numpy数组
-    X = np.array(X)
-    with open('mean_std.pkl', 'rb') as f:
-        mean_std = pickle.load(f)
-    mean = mean_std['mean']
-    std = mean_std['std']
-    # 标准化
-    X = (X - mean) / std
+    # 3. 将 X 转为 numpy
+    X = np.array(X)  # shape: (num_samples, feature_dim)
+
+    # 4. 先用模型初始化 mean/std 做标准化
+    start = time.time()
+    X_norm = standardize_data(X)
+    end = time.time()
+    print("标准化的执行时间为:", (end - start) * 1000000, "us")
+
+    # 5. 将原始数据（未标准化的 X）存入本地缓冲，用于统计新的环境均值和方差
+    update_local_buffer(X)
+
+    # 6. 每次推理后都试着计算新的环境均值、方差，并更新到 model_mean, model_std
+    new_mean, new_std = compute_environment_mean_std()
+    if new_mean is not None and new_std is not None:
+
+        update_model_mean_std(new_mean, new_std)
+        
     end = time.time()
     elapsed_time2 = end - start
     print("标准化的执行时间为:", elapsed_time2 * 1000000, "us")
 
+
+
+
     # 转换为PyTorch张量
-    X = torch.tensor(X, dtype=torch.float32).unsqueeze(1)  # 添加通道维度
+    X_tensor = torch.tensor(X_norm, dtype=torch.float32).unsqueeze(1)  # 添加通道维度
 
     # 加载和处理数据，以便于使用 PyTorch 的 DataLoader 类来迭代地加载数据批次
-    X_dataset = AudioDataset(X)
+    X_dataset = AudioDataset(X_tensor)
     # 创建一个 DataLoader 实例，用于以指定的批次大小（32个样本）从 X_dataset 数据集中加载数据，而不打乱数据的顺序。
     X_loader = DataLoader(X_dataset, batch_size=32, shuffle=False)
 
@@ -68,11 +89,14 @@ def inference(raw_bytes):
             # softmax函数的输出是一个向量，向量中的每个元素都是介于0和1之间的概率值，并且这些概率值的总和为1。
             confidences, predicted = torch.max(softmax_outputs.data, 1)  # 获取最大概率值（置信度）和对应的最大概率索引
 
+            confidence_val = confidences.item()  # 只取单个值
+            class_idx = predicted.item()         # 只取单个值
+        
             end = time.time()
             elapsed_time3 = end - start
             print("推理的执行时间为:", elapsed_time3 * 1000000, "us")
-            print("分类结果：", predicted)
-            print("置信度：", confidences)
+            print("分类结果：", class_idx)
+            print("置信度：", confidence_val)
 
     """
     with torch.no_grad():  # 不计算梯度
