@@ -1,0 +1,22 @@
+{
+  "sdk_library_path": "vendor/vk701n/libVK70XNMC_DAQ_SHARED.so",
+  "server_port": 8234,
+  "device_no": 0,
+  "adc_channel": 2,
+  "adc_total_channels": 4,
+  "sample_rate": 50000,
+  "bit_mode": 24,
+  "read_frame_count": 5000,
+  "gain": 0.668,
+  "blocking_timeout_ms": 1000,
+  "connect_timeout_s": 10.0,
+  "zero_read_timeout_s": 30.0,
+  "poll_interval_s": 0.01,
+  "preflight_cleanup": false,
+  "preflight_cleanup_delay_s": 0.5,
+  "initialize_all_profile": "code_source",
+  "post_initialize_delay_s": 1.0,
+  "post_start_delay_s": 0.1,
+  "input_range_volts": 5.0,
+  "capture_seconds": 100.0
+}
