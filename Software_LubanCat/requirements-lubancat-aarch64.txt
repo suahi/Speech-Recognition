@@ -1,0 +1,11 @@
+# Runtime repair set for LubanCat ARM64 Linux.
+# Use this inside the active conda/venv environment when NumPy or Qt packages
+# were installed before the project constraints were applied.
+numpy>=1.26.0,<2.0
+scipy>=1.11.4,<1.13
+PyWavelets>=1.5,<1.7
+librosa>=0.10.1,<0.11
+shiboken6==6.7.3
+PySide6_Essentials==6.7.3
+torch>=2.8,<2.13
+pytest>=8,<9

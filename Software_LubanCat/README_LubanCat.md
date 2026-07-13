@@ -48,6 +48,16 @@ VENV_DIR=/home/cat/oilstream-venv bash scripts/install_lubancat.sh
 SKIP_APT=1 bash scripts/install_lubancat.sh
 ```
 
+如果已经在现有 conda/miniforge 环境中启动过，并看到 `NumPy 2.0.2`、`shiboken6` 或 `xcb` 相关报错，先在该环境内修复：
+
+```bash
+cd /home/cat/gyroscope_detect/oilStream-test/Software_LubanCat
+python -m pip install --upgrade --force-reinstall --prefer-binary -r requirements-lubancat-aarch64.txt
+python -m pip install --no-deps -e .
+sudo apt-get update
+sudo apt-get install -y libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xfixes0 libxcb-xinerama0 libxcb-xinput0
+```
+
 ## 运行采集探针
 
 先关闭其他电脑上的厂家 DAQ 软件，确保只有鲁班猫连接采集卡：

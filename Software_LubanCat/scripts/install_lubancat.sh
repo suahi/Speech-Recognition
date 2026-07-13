@@ -6,6 +6,7 @@ PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 PYTHON_BIN="${PYTHON:-python3}"
 VENV_DIR="${VENV_DIR:-${PROJECT_ROOT}/.venv}"
 SKIP_APT="${SKIP_APT:-0}"
+REQUIREMENTS_FILE="${PROJECT_ROOT}/requirements-lubancat-aarch64.txt"
 
 system_name="$(uname -s)"
 machine_name="$(uname -m)"
@@ -69,7 +70,18 @@ if [[ -z "${VIRTUAL_ENV:-}" ]]; then
 fi
 
 python -m pip install --upgrade pip setuptools wheel
-python -m pip install --prefer-binary -e "${PROJECT_ROOT}[desktop,test]"
+if [[ "${system_name}" == "Linux" && "${is_arm64}" == "1" ]]; then
+  python -m pip install --upgrade --force-reinstall --prefer-binary \
+    "numpy>=1.26.0,<2.0" \
+    "scipy>=1.11.4,<1.13" \
+    "PyWavelets>=1.5,<1.7" \
+    "shiboken6==6.7.3" \
+    "PySide6_Essentials==6.7.3"
+  python -m pip install --upgrade --prefer-binary -r "${REQUIREMENTS_FILE}"
+  python -m pip install --no-deps -e "${PROJECT_ROOT}"
+else
+  python -m pip install --prefer-binary -e "${PROJECT_ROOT}[desktop,test]"
+fi
 
 python - <<'PY'
 import platform
@@ -105,4 +117,8 @@ Useful overrides:
   PYTHON=/path/to/python3 bash scripts/install_lubancat.sh
   VENV_DIR=/home/cat/oilstream-venv bash scripts/install_lubancat.sh
   SKIP_APT=1 bash scripts/install_lubancat.sh
+
+To repair an existing conda/miniforge environment such as (oil):
+  python -m pip install --upgrade --force-reinstall --prefer-binary -r requirements-lubancat-aarch64.txt
+  python -m pip install --no-deps -e .
 EOF
