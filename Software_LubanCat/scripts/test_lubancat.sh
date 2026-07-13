@@ -12,17 +12,5 @@ fi
 export LD_LIBRARY_PATH="${PROJECT_ROOT}/vendor/vk701n:${LD_LIBRARY_PATH:-}"
 export PYTHONPATH="${PROJECT_ROOT}/src:${PYTHONPATH:-}"
 
-if [[ -z "${QT_QPA_PLATFORM:-}" ]]; then
-  if [[ -n "${WAYLAND_DISPLAY:-}" && -z "${DISPLAY:-}" ]]; then
-    export QT_QPA_PLATFORM=wayland
-  else
-    export QT_QPA_PLATFORM=xcb
-  fi
-fi
-
-if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
-  echo "Warning: DISPLAY/WAYLAND_DISPLAY is empty. Start LubanCat desktop or enable X11 forwarding before opening the GUI."
-fi
-
 cd "${PROJECT_ROOT}"
-exec python run_app.py "$@"
+exec python -m pytest "$@"

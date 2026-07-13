@@ -27,3 +27,41 @@ def test_lubancat_hardware_defaults_use_initialize_all_profile() -> None:
     config = HardwareConfig()
 
     assert config.initialize_all_profile == "code_source"
+
+
+def test_lubancat_dependency_constraints_are_arm64_safe() -> None:
+    pyproject = (SOFTWARE_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert 'requires-python = ">=3.10,<3.13"' in pyproject
+    assert '"numpy>=1.26.0,<2.0"' in pyproject
+    assert '"torch>=2.8,<2.13"' in pyproject
+    assert '"PySide6_Essentials==6.7.3; platform_system == \'Linux\'' in pyproject
+    assert "platform_machine == 'aarch64'" in pyproject
+    assert '"PySide6>=6.7,<6.11; platform_system != \'Linux\'' in pyproject
+    assert "matplotlib" not in pyproject
+
+
+def test_lubancat_scripts_create_venv_and_export_runtime_paths() -> None:
+    scripts_dir = SOFTWARE_ROOT / "scripts"
+    install_script = (scripts_dir / "install_lubancat.sh").read_text(encoding="utf-8")
+    run_script = (scripts_dir / "run_app.sh").read_text(encoding="utf-8")
+    probe_script = (scripts_dir / "probe_vk701n.sh").read_text(encoding="utf-8")
+    test_script = (scripts_dir / "test_lubancat.sh").read_text(encoding="utf-8")
+
+    assert "uname -m" in install_script
+    assert "python3-venv" in install_script
+    assert "--prefer-binary" in install_script
+    assert "Dependency check:" in install_script
+    assert "QT_QPA_PLATFORM" in run_script
+    for script in (run_script, probe_script, test_script):
+        assert '.venv/bin/activate' in script
+        assert "LD_LIBRARY_PATH" in script
+        assert "PYTHONPATH" in script
+
+
+def test_lubancat_text_files_keep_lf_line_endings() -> None:
+    attributes = (SOFTWARE_ROOT / ".gitattributes").read_text(encoding="utf-8")
+
+    assert "*.sh text eol=lf" in attributes
+    assert "*.py text eol=lf" in attributes
+    assert "*.toml text eol=lf" in attributes
