@@ -7,7 +7,7 @@ import numpy as np
 
 try:
     from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
-    from PySide6.QtGui import QColor, QPainter, QPen
+    from PySide6.QtGui import QColor, QFont, QPainter, QPen
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -35,12 +35,12 @@ try:
 except Exception as exc:  # pragma: no cover
     raise RuntimeError("PySide6 is required to run the desktop app") from exc
 
-from voice_fault_diagnosis.capture.vk701n import Vk701nCaptureSession, resolve_sdk_library
 from voice_fault_diagnosis.app.waveform_display import WaveformDisplay, calculate_waveform_display
+from voice_fault_diagnosis.capture.vk701n import Vk701nCaptureSession, resolve_sdk_library
 from voice_fault_diagnosis.config import load_json, save_json
 from voice_fault_diagnosis.inference.legacy_cnn import LegacyCnnEngine
-from voice_fault_diagnosis.models import DenoiseConfig, HardwareConfig
-from voice_fault_diagnosis.paths import CONFIG_DIR, LEGACY_MODEL_DIR, RECORDS_DIR
+from voice_fault_diagnosis.models import DenoiseConfig, DiagnosisProgress, HardwareConfig
+from voice_fault_diagnosis.paths import CONFIG_DIR, LEGACY_MODEL_DIR
 from voice_fault_diagnosis.pipeline import run_diagnosis
 from voice_fault_diagnosis.storage.local_records import LocalRecordStore
 
@@ -51,7 +51,7 @@ PREVIEW_WINDOW_SECONDS = 0.2
 class WaveformWidget(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setMinimumHeight(220)
+        self.setMinimumHeight(240)
         self._audio = np.zeros(0, dtype=np.float32)
         self._adaptive = True
         self._full_scale_volts = 5.0
@@ -85,9 +85,9 @@ class WaveformWidget(QWidget):
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         rect = self.rect().adjusted(1, 1, -1, -1)
-        plot_rect = rect.adjusted(78, 8, -8, -24)
+        plot_rect = rect.adjusted(82, 12, -12, -28)
         painter.fillRect(rect, QColor("#101820"))
-        painter.setPen(QPen(QColor("#263849"), 1))
+        painter.setPen(QPen(QColor("#243443"), 1))
         for i in range(1, 5):
             y = plot_rect.top() + i * plot_rect.height() / 5
             painter.drawLine(plot_rect.left(), int(y), plot_rect.right(), int(y))
@@ -96,15 +96,15 @@ class WaveformWidget(QWidget):
             painter.drawLine(int(x), plot_rect.top(), int(x), plot_rect.bottom())
 
         display = self._display
-        painter.setPen(QColor("#a7b8c8"))
-        painter.drawText(rect.left() + 6, plot_rect.top() + 10, _format_volts(display.upper_volts))
-        painter.drawText(rect.left() + 6, plot_rect.center().y() + 4, _format_volts(display.center_volts))
-        painter.drawText(rect.left() + 6, plot_rect.bottom(), _format_volts(display.lower_volts))
-        painter.setPen(QPen(QColor("#48677f"), 1.2))
+        painter.setPen(QColor("#b7c6d8"))
+        painter.drawText(rect.left() + 8, plot_rect.top() + 10, _format_volts(display.upper_volts))
+        painter.drawText(rect.left() + 8, plot_rect.center().y() + 4, _format_volts(display.center_volts))
+        painter.drawText(rect.left() + 8, plot_rect.bottom(), _format_volts(display.lower_volts))
+        painter.setPen(QPen(QColor("#49687f"), 1.2))
         painter.drawLine(plot_rect.left(), plot_rect.center().y(), plot_rect.right(), plot_rect.center().y())
 
         if display.samples.size < 2:
-            painter.setPen(QColor("#a7b8c8"))
+            painter.setPen(QColor("#b7c6d8"))
             painter.drawText(plot_rect, Qt.AlignCenter, "暂无声纹电压数据")
             return
 
@@ -114,7 +114,7 @@ class WaveformWidget(QWidget):
         width = max(1, plot_rect.width() - 8)
         if display.is_envelope and display.y_min_values.size:
             count = display.y_min_values.size
-            painter.setPen(QPen(QColor("#35d399"), 1.0))
+            painter.setPen(QPen(QColor("#2ed3a6"), 1.0))
             for index, (y_min, y_max) in enumerate(zip(display.y_min_values, display.y_max_values)):
                 x = plot_rect.left() + 4 + index * width / max(1, count - 1)
                 y_top = center_y - float(y_max) * y_scale
@@ -137,7 +137,7 @@ class WaveformWidget(QWidget):
             x = plot_rect.left() + 4 + index * width / max(1, display.y_values.size - 1)
             y = center_y - float(display_value) * y_scale
             points.append((int(x), int(y)))
-        painter.setPen(QPen(QColor("#35d399"), 1.6))
+        painter.setPen(QPen(QColor("#2ed3a6"), 1.6))
         for left, right in zip(points, points[1:]):
             painter.drawLine(left[0], left[1], right[0], right[1])
 
@@ -151,17 +151,40 @@ def _format_volts(value: float) -> str:
     return f"{value * 1_000_000.0:.1f} uV"
 
 
+class ModelWarmupWorker(QObject):
+    status_changed = Signal(str)
+    failed = Signal(str, str)
+    done = Signal()
+
+    def __init__(self, engine: LegacyCnnEngine) -> None:
+        super().__init__()
+        self.engine = engine
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self.status_changed.emit("正在预热模型，首次诊断会更快...")
+            self.engine.prepare()
+            self.status_changed.emit("模型已预热，可以开始采集")
+        except Exception as exc:
+            self.failed.emit(f"{type(exc).__name__}: {exc}", traceback.format_exc())
+        finally:
+            self.done.emit()
+
+
 class DiagnosisWorker(QObject):
     chunk_ready = Signal(object, object)
+    progress_changed = Signal(object)
     status_changed = Signal(str)
     completed = Signal(str, object)
     failed = Signal(str, str)
     done = Signal()
 
-    def __init__(self, hardware: HardwareConfig, denoise: DenoiseConfig) -> None:
+    def __init__(self, hardware: HardwareConfig, denoise: DenoiseConfig, engine: LegacyCnnEngine) -> None:
         super().__init__()
         self.hardware = hardware
         self.denoise = denoise
+        self.engine = engine
         self.stop_event = threading.Event()
 
     @Slot()
@@ -177,13 +200,16 @@ class DiagnosisWorker(QObject):
             capture = session.capture(on_chunk=on_chunk, stop_event=self.stop_event)
             if capture.raw_voltage.size == 0:
                 raise RuntimeError("未采集到有效声纹电压数据")
-            self.status_changed.emit("正在降噪和推理...")
+
+            self.status_changed.emit("采集结束，正在诊断...")
+            self.progress_changed.emit(DiagnosisProgress("start", 1, "采集结束，准备诊断"))
             record_dir, prediction = run_diagnosis(
                 capture=capture,
                 hardware_config=self.hardware,
                 denoise_config=self.denoise,
-                engine=LegacyCnnEngine(),
+                engine=self.engine,
                 store=LocalRecordStore(),
+                progress_callback=self.progress_changed.emit,
             )
             self.completed.emit(str(record_dir), prediction)
         except Exception as exc:
@@ -198,14 +224,17 @@ class DiagnosisWorker(QObject):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("声纹故障诊断系统")
+        self.setWindowTitle("声纹故障诊断系统 - 鲁班猫")
         self.resize(1280, 820)
         self._thread: QThread | None = None
         self._worker: DiagnosisWorker | None = None
+        self._warmup_thread: QThread | None = None
+        self._warmup_worker: ModelWarmupWorker | None = None
         self.preview_voltage = np.zeros(0, dtype=np.float32)
         self.active_sample_rate = 50000
         self.active_input_range_volts = 5.0
         self.store = LocalRecordStore()
+        self.engine = LegacyCnnEngine()
         self._hardware_config_path = CONFIG_DIR / "hardware_vk701n.json"
 
         self.tabs = QTabWidget()
@@ -217,12 +246,15 @@ class MainWindow(QMainWindow):
         self._build_result_tab()
         self._build_history_tab()
         self._refresh_history()
+        self._start_model_warmup()
 
     def _build_hardware_tab(self) -> None:
         page = QWidget()
         layout = QVBoxLayout(page)
+        layout.setContentsMargins(18, 18, 18, 18)
         group = QGroupBox("VK701N-SD 硬件设置")
         form = QFormLayout(group)
+        form.setLabelAlignment(Qt.AlignRight)
 
         cfg = HardwareConfig.from_dict(load_json(self._hardware_config_path, {}))
         sdk_default = cfg.sdk_library_path or str(resolve_sdk_library(""))
@@ -244,10 +276,10 @@ class MainWindow(QMainWindow):
         self.blocking_spin = _spin(cfg.blocking_timeout_ms, 1, 10000)
         self.capture_seconds_spin = _double_spin(cfg.capture_seconds, 0.1, 3600.0, 1)
         self.initialize_profile_combo = QComboBox()
-        self.initialize_profile_combo.addItems(["windows_c_example", "code_source", "fixed"])
-        initialize_profile = str(cfg.initialize_all_profile or "windows_c_example")
+        self.initialize_profile_combo.addItems(["code_source", "fixed", "windows_c_example"])
+        initialize_profile = str(cfg.initialize_all_profile or "code_source")
         if initialize_profile not in {"windows_c_example", "code_source", "fixed"}:
-            initialize_profile = "windows_c_example"
+            initialize_profile = "code_source"
         self.initialize_profile_combo.setCurrentText(initialize_profile)
         form.addRow("端口", self.port_spin)
         form.addRow("设备号", self.device_spin)
@@ -255,24 +287,25 @@ class MainWindow(QMainWindow):
         form.addRow("位深", self.bit_mode_spin)
         form.addRow("ADC 通道", self.channel_spin)
         form.addRow("每次读取点数", self.frame_spin)
-        form.addRow("旧模型增益", self.gain_spin)
+        form.addRow("legacy 增益", self.gain_spin)
         form.addRow("阻塞超时 ms", self.blocking_spin)
         form.addRow("采集时长 s", self.capture_seconds_spin)
-        form.addRow("初始化布局", self.initialize_profile_combo)
+        form.addRow("初始化 profile", self.initialize_profile_combo)
 
         save_button = QPushButton("保存硬件配置")
         save_button.clicked.connect(self._save_hardware_config)
         layout.addWidget(group)
-        layout.addWidget(save_button)
+        layout.addWidget(save_button, 0, Qt.AlignLeft)
         layout.addStretch(1)
         self.tabs.addTab(page, "硬件设置")
 
     def _build_capture_tab(self) -> None:
         page = QWidget()
         layout = QVBoxLayout(page)
+        layout.setContentsMargins(18, 18, 18, 18)
         controls = QHBoxLayout()
-        self.start_button = QPushButton("开始采集并诊断")
-        self.stop_button = QPushButton("停止")
+        self.start_button = QPushButton("开始采集")
+        self.stop_button = QPushButton("停止并诊断")
         self.stop_button.setEnabled(False)
         self.start_button.clicked.connect(self._start_capture)
         self.stop_button.clicked.connect(self._stop_capture)
@@ -285,10 +318,18 @@ class MainWindow(QMainWindow):
         controls.addStretch(1)
 
         self.capture_status = QLabel("等待采集")
+        self.capture_status.setObjectName("StatusLabel")
         self.level_bar = QProgressBar()
         self.level_bar.setRange(0, 100)
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 100)
+        self.level_bar.setFormat("输入电平 %p%")
+        self.capture_progress_bar = QProgressBar()
+        self.capture_progress_bar.setRange(0, 100)
+        self.capture_progress_bar.setFormat("采集进度 %p%")
+        self.diagnosis_step_label = QLabel("诊断进度：等待采集")
+        self.diagnosis_step_label.setObjectName("MutedLabel")
+        self.diagnosis_progress_bar = QProgressBar()
+        self.diagnosis_progress_bar.setRange(0, 100)
+        self.diagnosis_progress_bar.setFormat("%p%")
         self.waveform = WaveformWidget()
         self.capture_summary = QPlainTextEdit()
         self.capture_summary.setReadOnly(True)
@@ -296,25 +337,27 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(controls)
         layout.addWidget(self.capture_status)
-        layout.addWidget(QLabel("输入电平"))
         layout.addWidget(self.level_bar)
-        layout.addWidget(QLabel("采集进度"))
-        layout.addWidget(self.progress_bar)
+        layout.addWidget(self.capture_progress_bar)
+        layout.addWidget(self.diagnosis_step_label)
+        layout.addWidget(self.diagnosis_progress_bar)
         layout.addWidget(QLabel("实时声纹电压"))
         layout.addWidget(self.waveform)
         layout.addWidget(QLabel("采集摘要"))
         layout.addWidget(self.capture_summary)
-        self.tabs.addTab(page, "采集界面")
+        self.tabs.addTab(page, "采集诊断")
 
     def _build_denoise_tab(self) -> None:
         page = QWidget()
         layout = QVBoxLayout(page)
+        layout.setContentsMargins(18, 18, 18, 18)
         group = QGroupBox("降噪设置")
         form = QFormLayout(group)
+        form.setLabelAlignment(Qt.AlignRight)
         cfg = DenoiseConfig.from_dict(load_json(CONFIG_DIR / "denoise.json", {}))
         self.denoise_enabled = QCheckBox("启用降噪")
         self.denoise_enabled.setChecked(cfg.enabled)
-        self.bandpass_enabled = QCheckBox("启用窄带/带通滤波")
+        self.bandpass_enabled = QCheckBox("启用带通滤波")
         self.bandpass_enabled.setChecked(cfg.bandpass_enabled)
         self.low_spin = _double_spin(cfg.bandpass_low_hz, 0.1, 100000.0, 1)
         self.high_spin = _double_spin(cfg.bandpass_high_hz, 0.1, 100000.0, 1)
@@ -334,13 +377,16 @@ class MainWindow(QMainWindow):
         save_button = QPushButton("保存降噪配置")
         save_button.clicked.connect(self._save_denoise_config)
         layout.addWidget(group)
-        layout.addWidget(save_button)
+        layout.addWidget(save_button, 0, Qt.AlignLeft)
         layout.addStretch(1)
         self.tabs.addTab(page, "降噪配置")
 
     def _build_model_tab(self) -> None:
         page = QWidget()
         layout = QVBoxLayout(page)
+        layout.setContentsMargins(18, 18, 18, 18)
+        self.model_status_label = QLabel("模型状态：等待预热")
+        self.model_status_label.setObjectName("StatusLabel")
         text = QPlainTextEdit()
         text.setReadOnly(True)
         text.setPlainText(
@@ -348,18 +394,22 @@ class MainWindow(QMainWindow):
                 [
                     "当前模型: Legacy CNN",
                     f"模型目录: {LEGACY_MODEL_DIR}",
+                    "后端: PyTorch",
+                    "输入特征: 1 x 36 x 5，来自 MFCC / Mel / Chroma 统计特征",
                     "输出类别数: 10",
                     "标签配置: configs/labels.json",
-                    "说明: 第一版使用 CodeSource/python_continuous_sampling 的 best_model_cnn.pt 和 mean_std.pkl。",
+                    "说明: 使用 CodeSource/python_continuous_sampling 的 best_model_cnn.pt 和 mean_std.pkl。",
                 ]
             )
         )
+        layout.addWidget(self.model_status_label)
         layout.addWidget(text)
         self.tabs.addTab(page, "模型管理")
 
     def _build_result_tab(self) -> None:
         page = QWidget()
         layout = QVBoxLayout(page)
+        layout.setContentsMargins(18, 18, 18, 18)
         self.result_text = QPlainTextEdit()
         self.result_text.setReadOnly(True)
         self.result_text.setPlainText("完成采集并诊断后显示结果。")
@@ -369,12 +419,13 @@ class MainWindow(QMainWindow):
     def _build_history_tab(self) -> None:
         page = QWidget()
         layout = QVBoxLayout(page)
+        layout.setContentsMargins(18, 18, 18, 18)
         refresh = QPushButton("刷新历史记录")
         refresh.clicked.connect(self._refresh_history)
         self.history_table = QTableWidget(0, 5)
-        self.history_table.setHorizontalHeaderLabels(["时间", "记录ID", "类别", "置信度", "目录"])
+        self.history_table.setHorizontalHeaderLabels(["时间", "记录 ID", "类别", "置信度", "目录"])
         self.history_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        layout.addWidget(refresh)
+        layout.addWidget(refresh, 0, Qt.AlignLeft)
         layout.addWidget(self.history_table)
         self.tabs.addTab(page, "历史记录")
 
@@ -409,6 +460,21 @@ class MainWindow(QMainWindow):
             wavelet_level=int(self.wavelet_level.value()),
         )
 
+    def _start_model_warmup(self) -> None:
+        if self._warmup_thread is not None:
+            return
+        self._warmup_thread = QThread(self)
+        self._warmup_worker = ModelWarmupWorker(self.engine)
+        self._warmup_worker.moveToThread(self._warmup_thread)
+        self._warmup_thread.started.connect(self._warmup_worker.run)
+        self._warmup_worker.status_changed.connect(self._on_model_status)
+        self._warmup_worker.failed.connect(self._on_model_warmup_failed)
+        self._warmup_worker.done.connect(self._warmup_thread.quit)
+        self._warmup_worker.done.connect(self._warmup_worker.deleteLater)
+        self._warmup_thread.finished.connect(self._warmup_thread.deleteLater)
+        self._warmup_thread.finished.connect(self._clear_warmup_worker)
+        self._warmup_thread.start()
+
     def _start_capture(self) -> None:
         if self._thread is not None:
             return
@@ -419,18 +485,22 @@ class MainWindow(QMainWindow):
         self.preview_voltage = np.zeros(0, dtype=np.float32)
         self.waveform.set_display_mode(self.auto_scale_checkbox.isChecked(), self.active_input_range_volts)
         self.waveform.set_audio(self.preview_voltage)
-        self.progress_bar.setValue(0)
+        self.capture_progress_bar.setValue(0)
+        self.diagnosis_progress_bar.setValue(0)
+        self.diagnosis_step_label.setText("诊断进度：等待采集结束")
         self.level_bar.setValue(0)
-        self.result_text.setPlainText("正在采集并诊断...")
+        self.result_text.setPlainText("正在采集，停止后将自动诊断。")
+        self.capture_status.setText("正在采集声纹电压...")
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
 
         self._thread = QThread(self)
-        self._worker = DiagnosisWorker(hardware, denoise)
+        self._worker = DiagnosisWorker(hardware, denoise, self.engine)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.status_changed.connect(self.capture_status.setText)
         self._worker.chunk_ready.connect(self._on_chunk)
+        self._worker.progress_changed.connect(self._on_diagnosis_progress)
         self._worker.completed.connect(self._on_completed)
         self._worker.failed.connect(self._on_failed)
         self._worker.done.connect(self._thread.quit)
@@ -442,7 +512,9 @@ class MainWindow(QMainWindow):
     def _stop_capture(self) -> None:
         if self._worker is not None:
             self._worker.stop()
-            self.capture_status.setText("正在停止...")
+            self.capture_status.setText("正在停止采集，随后进入诊断...")
+            self.diagnosis_step_label.setText("诊断进度：等待采集线程收尾")
+            self.stop_button.setEnabled(False)
 
     def _on_display_mode_changed(self) -> None:
         self.waveform.set_display_mode(self.auto_scale_checkbox.isChecked(), self.active_input_range_volts)
@@ -467,7 +539,7 @@ class MainWindow(QMainWindow):
         received = int(info.get("received_samples") or 0)
         target = int(info.get("target_samples") or 0)
         if target:
-            self.progress_bar.setValue(min(100, int(round(received / target * 100))))
+            self.capture_progress_bar.setValue(min(100, int(round(received / target * 100))))
         stats = self.waveform.display_stats
         display_mode = "自适应交流显示" if self.auto_scale_checkbox.isChecked() else "满量程电压显示"
         self.capture_summary.setPlainText(
@@ -478,27 +550,41 @@ class MainWindow(QMainWindow):
                     f"当前样本数: {received}",
                     f"目标样本数: {target}",
                     f"读取次数: {info.get('read_calls', 0)}",
-                    f"累计0读次数: {info.get('zero_read_count', 0)}",
-                    f"最近SDK返回: {info.get('last_recv_lengths', [])}",
+                    f"连续 0 读取次数: {info.get('zero_read_count', 0)}",
+                    f"最近 SDK 返回: {info.get('last_recv_lengths', [])}",
                     f"预览窗口: {PREVIEW_WINDOW_SECONDS:.2f} s",
-                    f"启动Profile: {info.get('startup_profile', '')}",
-                    f"初始化参数: {info.get('initialize_all_params', [])}",
-                    f"预清理: {'开启' if info.get('preflight_cleanup_enabled') else '关闭'}",
-                    f"预清理 StopSampling: {info.get('preflight_stop_sampling_status', '')}",
-                    f"预清理 TCPClose: {info.get('preflight_tcp_close_status', '')}",
+                    f"启动 profile: {info.get('startup_profile', '')}",
                     f"显示模式: {display_mode}",
                     f"均值: {stats.mean_volts:.9f} V",
                     f"交流 RMS: {stats.ac_rms_volts:.9f} V",
                     f"峰峰值: {stats.peak_to_peak_volts:.9f} V",
                     f"显示范围: {stats.lower_volts:.9f} V ~ {stats.upper_volts:.9f} V",
-                    f"显示缩放倍数: {self.waveform.display_scale:.1f}x",
+                    f"显示缩放: {self.waveform.display_scale:.1f}x",
                 ]
             )
         )
 
+    def _on_diagnosis_progress(self, progress_obj: object) -> None:
+        if isinstance(progress_obj, DiagnosisProgress):
+            percent = max(0, min(100, int(progress_obj.percent)))
+            self.diagnosis_progress_bar.setValue(percent)
+            self.diagnosis_step_label.setText(f"诊断进度：{progress_obj.message}")
+        elif isinstance(progress_obj, dict):
+            percent = max(0, min(100, int(progress_obj.get("percent") or 0)))
+            self.diagnosis_progress_bar.setValue(percent)
+            self.diagnosis_step_label.setText(f"诊断进度：{progress_obj.get('message', '')}")
+
     def _on_completed(self, record_dir: str, prediction) -> None:
         self.capture_status.setText("诊断完成")
-        self.progress_bar.setValue(100)
+        self.capture_progress_bar.setValue(100)
+        self.diagnosis_progress_bar.setValue(100)
+        self.diagnosis_step_label.setText("诊断进度：完成")
+        timings = prediction.metadata.get("timings", {}) if isinstance(prediction.metadata, dict) else {}
+        timing_lines = [
+            f"  {key}: {float(value):.3f} s"
+            for key, value in timings.items()
+            if isinstance(value, (int, float))
+        ]
         self.result_text.setPlainText(
             "\n".join(
                 [
@@ -513,6 +599,9 @@ class MainWindow(QMainWindow):
                         f"  {item['class_index']} / {item['label']}: {item['confidence']:.6f}"
                         for item in prediction.top_k
                     ],
+                    "",
+                    "耗时:",
+                    *(timing_lines or ["  暂无耗时数据"]),
                 ]
             )
         )
@@ -523,14 +612,26 @@ class MainWindow(QMainWindow):
 
     def _on_failed(self, message: str, details: str) -> None:
         self.capture_status.setText("诊断失败")
+        self.diagnosis_step_label.setText("诊断进度：失败")
         self.result_text.setPlainText(details)
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         QMessageBox.critical(self, "诊断失败", message)
 
+    def _on_model_status(self, message: str) -> None:
+        self.model_status_label.setText(f"模型状态：{message}")
+
+    def _on_model_warmup_failed(self, message: str, details: str) -> None:
+        self.model_status_label.setText(f"模型状态：预热失败 - {message}")
+        self.result_text.setPlainText(details)
+
     def _clear_worker(self) -> None:
         self._thread = None
         self._worker = None
+
+    def _clear_warmup_worker(self) -> None:
+        self._warmup_thread = None
+        self._warmup_worker = None
 
     def _refresh_history(self) -> None:
         if not hasattr(self, "history_table"):
@@ -582,8 +683,90 @@ def _double_spin(value: float, minimum: float, maximum: float, decimals: int) ->
     return spin
 
 
+def _apply_style(app: QApplication) -> None:
+    font = QFont("Microsoft YaHei")
+    font.setPointSize(10)
+    app.setFont(font)
+    app.setStyleSheet(
+        """
+        QMainWindow, QWidget {
+            background: #f4f7fb;
+            color: #1f2937;
+        }
+        QTabWidget::pane {
+            border: 1px solid #d6dee8;
+            background: #ffffff;
+        }
+        QTabBar::tab {
+            background: #e8eef6;
+            border: 1px solid #d6dee8;
+            padding: 8px 18px;
+            margin-right: 2px;
+        }
+        QTabBar::tab:selected {
+            background: #ffffff;
+            color: #0f766e;
+            border-bottom-color: #ffffff;
+        }
+        QGroupBox {
+            background: #ffffff;
+            border: 1px solid #d6dee8;
+            border-radius: 6px;
+            margin-top: 12px;
+            padding: 14px;
+            font-weight: 600;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            left: 12px;
+            padding: 0 4px;
+        }
+        QPushButton {
+            background: #0f766e;
+            color: white;
+            border: 0;
+            border-radius: 5px;
+            padding: 8px 16px;
+            font-weight: 600;
+        }
+        QPushButton:hover {
+            background: #0d9488;
+        }
+        QPushButton:disabled {
+            background: #a8b3c2;
+            color: #eef2f7;
+        }
+        QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QPlainTextEdit, QTableWidget {
+            background: #ffffff;
+            border: 1px solid #ccd6e2;
+            border-radius: 4px;
+            padding: 4px;
+        }
+        QProgressBar {
+            border: 1px solid #ccd6e2;
+            border-radius: 5px;
+            text-align: center;
+            background: #eef3f8;
+            min-height: 18px;
+        }
+        QProgressBar::chunk {
+            background: #14b8a6;
+            border-radius: 4px;
+        }
+        QLabel#StatusLabel {
+            color: #0f766e;
+            font-weight: 600;
+        }
+        QLabel#MutedLabel {
+            color: #4b5563;
+        }
+        """
+    )
+
+
 def main() -> int:
     app = QApplication([])
+    _apply_style(app)
     window = MainWindow()
     window.show()
     return app.exec()

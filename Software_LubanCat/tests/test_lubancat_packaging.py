@@ -75,6 +75,18 @@ def test_lubancat_text_files_keep_lf_line_endings() -> None:
     assert "*.txt text eol=lf" in attributes
 
 
+def test_lubancat_ui_exposes_diagnosis_progress_and_utf8_labels() -> None:
+    main_window = (SOFTWARE_ROOT / "src" / "voice_fault_diagnosis" / "app" / "main_window.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "诊断进度" in main_window
+    assert "停止并诊断" in main_window
+    assert "模型已预热" in main_window
+    assert "progress_changed" in main_window
+    assert "QProgressBar" in main_window
+
+
 def test_direct_startup_preflight_reports_numpy_2_and_missing_xcb_cursor() -> None:
     versions = {
         "numpy": "2.0.2",

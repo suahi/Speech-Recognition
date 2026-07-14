@@ -73,6 +73,16 @@ class CaptureResult:
 
 
 @dataclass
+class DiagnosisProgress:
+    stage: str
+    percent: int
+    message: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class PredictionResult:
     model_name: str
     class_index: int

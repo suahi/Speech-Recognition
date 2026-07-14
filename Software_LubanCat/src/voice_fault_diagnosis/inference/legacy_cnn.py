@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 import json
 from pathlib import Path
 import pickle
+import threading
+from time import perf_counter
 from typing import Any
 
 import numpy as np
 
 from voice_fault_diagnosis.config import load_json
-from voice_fault_diagnosis.models import PredictionResult
+from voice_fault_diagnosis.models import DiagnosisProgress, PredictionResult
 from voice_fault_diagnosis.paths import CONFIG_DIR, LEGACY_MODEL_DIR
+
+
+ProgressCallback = Callable[[DiagnosisProgress], None]
 
 
 class LegacyCnnEngine:
@@ -30,25 +36,45 @@ class LegacyCnnEngine:
         self._model = None
         self._mean = None
         self._std = None
+        self._load_lock = threading.RLock()
 
-    def predict(self, legacy_input: bytes) -> PredictionResult:
+    def prepare(self) -> None:
+        self._ensure_loaded()
+
+    def predict(self, legacy_input: bytes, progress_callback: ProgressCallback | None = None) -> PredictionResult:
         if not legacy_input:
             raise ValueError("legacy_input is empty")
+        total_started = perf_counter()
+        prepare_started = perf_counter()
+        _emit(progress_callback, "prepare_model", 40, "正在加载 legacy CNN 模型")
         self._ensure_loaded()
+        prepare_seconds = perf_counter() - prepare_started
+
+        feature_started = perf_counter()
+        _emit(progress_callback, "extract_features", 55, "正在提取 MFCC、Mel 与 Chroma 特征")
         features, raw_samples, real, imaginary = extract_legacy_features(
             legacy_input,
             sample_rate=int(self.manifest.get("sample_rate", 50000)),
             n_fft=int(self.manifest.get("feature_n_fft", 1024)),
         )
+        feature_seconds = perf_counter() - feature_started
+
+        normalize_started = perf_counter()
+        _emit(progress_callback, "normalize_features", 68, "正在标准化模型输入")
         normalized = (features - self._mean) / self._std
+        normalize_seconds = perf_counter() - normalize_started
 
         import torch
         import torch.nn.functional as F
 
+        inference_started = perf_counter()
+        _emit(progress_callback, "model_inference", 75, "正在执行 CNN 推理")
         tensor = torch.tensor(np.asarray([normalized]), dtype=torch.float32).unsqueeze(1)
-        with torch.no_grad():
+        with torch.inference_mode():
             logits = self._model(tensor)
             probabilities = F.softmax(logits, dim=1).cpu().numpy()[0].astype(float)
+        inference_seconds = perf_counter() - inference_started
+
         class_index = int(np.argmax(probabilities))
         confidence = float(probabilities[class_index])
         top_indices = np.argsort(probabilities)[::-1][: min(5, probabilities.size)]
@@ -75,22 +101,31 @@ class LegacyCnnEngine:
                 "model_path": str(self.model_path),
                 "mean_std_path": str(self.mean_std_path),
                 "labels_path": str(self.labels_path),
+                "timings": {
+                    "prepare_seconds": prepare_seconds,
+                    "feature_seconds": feature_seconds,
+                    "normalize_seconds": normalize_seconds,
+                    "inference_seconds": inference_seconds,
+                    "total_predict_seconds": perf_counter() - total_started,
+                },
             },
         )
 
     def _ensure_loaded(self) -> None:
-        if self._model is None:
-            import audiomodel  # noqa: F401
-            import torch
+        with self._load_lock:
+            if self._model is None:
+                import audiomodel  # noqa: F401
+                import librosa  # noqa: F401
+                import torch
 
-            self._model = torch.load(self.model_path, map_location="cpu", weights_only=False)
-            self._model.eval()
-        if self._mean is None or self._std is None:
-            with self.mean_std_path.open("rb") as handle:
-                mean_std = pickle.load(handle)
-            self._mean = np.asarray(mean_std["mean"], dtype=np.float32)
-            self._std = np.asarray(mean_std["std"], dtype=np.float32)
-            self._std = np.where(np.abs(self._std) < 1e-9, 1.0, self._std)
+                self._model = torch.load(self.model_path, map_location="cpu", weights_only=False)
+                self._model.eval()
+            if self._mean is None or self._std is None:
+                with self.mean_std_path.open("rb") as handle:
+                    mean_std = pickle.load(handle)
+                self._mean = np.asarray(mean_std["mean"], dtype=np.float32)
+                self._std = np.asarray(mean_std["std"], dtype=np.float32)
+                self._std = np.where(np.abs(self._std) < 1e-9, 1.0, self._std)
 
     def _resolve_labels_path(self, configured: str | Path) -> Path:
         path = Path(configured)
@@ -122,12 +157,9 @@ def extract_legacy_features(
 
     y = np.frombuffer(raw_bytes, dtype=np.uint8).astype(np.float32)
     mfccs = np.mean(librosa.feature.mfcc(y=y, sr=sample_rate, n_mfcc=36, n_fft=n_fft).T, axis=0)
-    real = np.real(
-        librosa.stft(y, n_fft=128, hop_length=None, window="hann", center=True, pad_mode="reflect")
-    ).flatten()
-    imaginary = np.imag(
-        librosa.stft(y, n_fft=128, hop_length=None, window="hann", center=True, pad_mode="reflect")
-    ).flatten()
+    stft = librosa.stft(y, n_fft=128, hop_length=None, window="hann", center=True, pad_mode="reflect")
+    real = np.real(stft).flatten()
+    imaginary = np.imag(stft).flatten()
     mel = np.mean(
         librosa.feature.melspectrogram(y=y, sr=sample_rate, n_mels=36, fmax=sample_rate // 2, n_fft=n_fft).T,
         axis=0,
@@ -137,3 +169,8 @@ def extract_legacy_features(
     chroma_cens = np.mean(librosa.feature.chroma_cens(y=y, sr=sample_rate, n_chroma=36).T, axis=0)
     features = np.reshape(np.vstack((mfccs, mel, chroma_stft, chroma_cq, chroma_cens)), (36, 5))
     return features.astype(np.float32), y, real.astype(np.float32), imaginary.astype(np.float32)
+
+
+def _emit(progress_callback: ProgressCallback | None, stage: str, percent: int, message: str) -> None:
+    if progress_callback is not None:
+        progress_callback(DiagnosisProgress(stage=stage, percent=percent, message=message))

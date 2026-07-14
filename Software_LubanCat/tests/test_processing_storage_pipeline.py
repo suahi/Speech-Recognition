@@ -6,15 +6,17 @@ import numpy as np
 
 from voice_fault_diagnosis.audio_io import voltage_to_audio
 from voice_fault_diagnosis.legacy_format import voltage_to_legacy_bytes
-from voice_fault_diagnosis.models import CaptureResult, DenoiseConfig, HardwareConfig, PredictionResult
+from voice_fault_diagnosis.models import CaptureResult, DenoiseConfig, DiagnosisProgress, HardwareConfig, PredictionResult
 from voice_fault_diagnosis.pipeline import run_diagnosis
 from voice_fault_diagnosis.processing.denoise import apply_denoise
 from voice_fault_diagnosis.storage.local_records import LocalRecordStore
 
 
 class FakeEngine:
-    def predict(self, legacy_input: bytes) -> PredictionResult:
+    def predict(self, legacy_input: bytes, progress_callback=None) -> PredictionResult:
         assert legacy_input
+        if progress_callback is not None:
+            progress_callback(DiagnosisProgress(stage="fake_model", percent=75, message="fake inference"))
         return PredictionResult(
             model_name="fake",
             class_index=2,
@@ -76,3 +78,30 @@ def test_pipeline_saves_local_files_without_sqlite(tmp_path) -> None:
     result = json.loads((record_dir / "result.json").read_text(encoding="utf-8"))
     assert result["confidence"] == 0.75
     assert store.list_records()[0]["label"] == "class_2"
+
+
+def test_pipeline_emits_diagnosis_progress_events(tmp_path) -> None:
+    hardware = HardwareConfig(sample_rate=50000, input_range_volts=5.0)
+    voltage = np.linspace(-0.25, 0.25, 5000, dtype=np.float32)
+    capture = CaptureResult(
+        raw_voltage=voltage,
+        legacy_input=voltage_to_legacy_bytes(voltage),
+        sample_rate=hardware.sample_rate,
+        metadata={"daq_ip": "fake"},
+    )
+    events: list[DiagnosisProgress] = []
+
+    run_diagnosis(
+        capture=capture,
+        hardware_config=hardware,
+        denoise_config=DenoiseConfig(enabled=False),
+        engine=FakeEngine(),
+        store=LocalRecordStore(tmp_path / "records"),
+        progress_callback=events.append,
+    )
+
+    stages = [event.stage for event in events]
+    assert stages[:3] == ["audio", "denoise", "inference"]
+    assert "fake_model" in stages
+    assert stages[-2:] == ["storage", "complete"]
+    assert events[-1].percent == 100
