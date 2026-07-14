@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from voice_fault_diagnosis.app.waveform_display import calculate_waveform_display
+from voice_fault_diagnosis.app.waveform_display import calculate_shared_scale, calculate_waveform_display
 
 
 def test_adaptive_display_expands_small_ac_signal_with_dc_bias() -> None:
@@ -64,3 +64,14 @@ def test_large_display_uses_min_max_envelope_instead_of_simple_decimation() -> N
     assert display.y_max_values.size == 100
     assert float(np.min(display.y_min_values)) < -0.2
     assert float(np.max(display.y_max_values)) > 0.2
+
+
+def test_comparison_scale_is_derived_once_from_raw_voltage() -> None:
+    phase = np.linspace(0.0, 4.0 * np.pi, 4000, dtype=np.float32)
+    raw = -0.04 + 0.004 * np.sin(phase)
+
+    scale = calculate_shared_scale(raw)
+
+    assert abs(scale.center_volts + 0.04) < 1e-4
+    assert scale.half_span_volts >= 0.004
+    assert scale.half_span_volts < 0.02

@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-import json
+import importlib
 from pathlib import Path
 import pickle
 import threading
 from time import perf_counter
-from typing import Any
 
 import numpy as np
 
@@ -114,8 +113,8 @@ class LegacyCnnEngine:
     def _ensure_loaded(self) -> None:
         with self._load_lock:
             if self._model is None:
-                import audiomodel  # noqa: F401
-                import librosa  # noqa: F401
+                importlib.import_module("audiomodel")
+                importlib.import_module("librosa")
                 import torch
 
                 self._model = torch.load(self.model_path, map_location="cpu", weights_only=False)

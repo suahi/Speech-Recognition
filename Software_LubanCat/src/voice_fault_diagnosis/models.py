@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
+
+AnalysisSource = Literal["raw", "denoised"]
 
 
 @dataclass
@@ -80,6 +84,33 @@ class DiagnosisProgress:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass
+class DenoiseResult:
+    processed_audio: Any
+    config: DenoiseConfig
+    metadata: dict[str, Any] = field(default_factory=dict)
+    metrics: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass
+class StoredCapture:
+    capture: CaptureResult
+    hardware_config: HardwareConfig
+    record_dir: Path
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+class WorkflowState(str, Enum):
+    IDLE = "idle"
+    CAPTURING = "capturing"
+    CAPTURED = "captured"
+    DENOISING = "denoising"
+    READY_TO_ANALYZE = "ready_to_analyze"
+    ANALYZING = "analyzing"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 
 @dataclass

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+import re
 
 from voice_fault_diagnosis.capture.vk701n import resolve_sdk_library
 from voice_fault_diagnosis.models import HardwareConfig
@@ -75,16 +75,32 @@ def test_lubancat_text_files_keep_lf_line_endings() -> None:
     assert "*.txt text eol=lf" in attributes
 
 
-def test_lubancat_ui_exposes_diagnosis_progress_and_utf8_labels() -> None:
+def test_lubancat_ui_exposes_guided_capture_denoise_workflow() -> None:
     main_window = (SOFTWARE_ROOT / "src" / "voice_fault_diagnosis" / "app" / "main_window.py").read_text(
         encoding="utf-8"
     )
+    comparison = (
+        SOFTWARE_ROOT / "src" / "voice_fault_diagnosis" / "app" / "denoise_comparison.py"
+    ).read_text(encoding="utf-8")
 
     assert "诊断进度" in main_window
-    assert "停止并诊断" in main_window
+    assert "停止采集" in main_window
+    assert "重新采样" in main_window
+    assert "进入降噪对比" in main_window
+    assert "读取已保存采样" in main_window
+    assert "不降噪，直接分析" in main_window
+    assert "使用当前降噪结果分析" in main_window
     assert "模型已预热" in main_window
     assert "progress_changed" in main_window
     assert "QProgressBar" in main_window
+    assert "PostCaptureDialog" in main_window
+    assert "CaptureWorker" in main_window
+    assert "DenoiseWorker" in main_window
+    assert "AnalysisWorker" in main_window
+    assert "原始电压波形" in comparison
+    assert "降噪后电压波形" in comparison
+    tab_labels = ["硬件设置", "数据采集", "降噪对比", "诊断结果", "历史记录", "模型信息"]
+    assert re.findall(r'self\.tabs\.addTab\(page, "([^"]+)"\)', main_window) == tab_labels
 
 
 def test_direct_startup_preflight_reports_numpy_2_and_missing_xcb_cursor() -> None:
