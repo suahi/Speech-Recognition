@@ -51,6 +51,7 @@ def test_lubancat_scripts_create_venv_and_export_runtime_paths() -> None:
     install_script = (scripts_dir / "install_lubancat.sh").read_text(encoding="utf-8")
     run_script = (scripts_dir / "run_app.sh").read_text(encoding="utf-8")
     probe_script = (scripts_dir / "probe_vk701n.sh").read_text(encoding="utf-8")
+    sound_check_script = (scripts_dir / "check_sound_capture.sh").read_text(encoding="utf-8")
     test_script = (scripts_dir / "test_lubancat.sh").read_text(encoding="utf-8")
 
     assert "uname -m" in install_script
@@ -60,10 +61,11 @@ def test_lubancat_scripts_create_venv_and_export_runtime_paths() -> None:
     assert "requirements-lubancat-aarch64.txt" in install_script
     assert "Dependency check:" in install_script
     assert "QT_QPA_PLATFORM" in run_script
-    for script in (run_script, probe_script, test_script):
+    for script in (run_script, probe_script, sound_check_script, test_script):
         assert '.venv/bin/activate' in script
         assert "LD_LIBRARY_PATH" in script
         assert "PYTHONPATH" in script
+    assert "tools/check_sound_capture.py" in sound_check_script
 
 
 def test_lubancat_text_files_keep_lf_line_endings() -> None:
@@ -97,6 +99,10 @@ def test_lubancat_ui_exposes_guided_capture_denoise_workflow() -> None:
     assert "CaptureWorker" in main_window
     assert "DenoiseWorker" in main_window
     assert "AnalysisWorker" in main_window
+    assert "SoundCaptureCheckDialog" in main_window
+    assert "采集链路自检" in main_window
+    assert "输入量程" in main_window
+    assert "应用推荐通道和量程" in main_window
     assert "原始电压波形" in comparison
     assert "降噪后电压波形" in comparison
     tab_labels = ["硬件设置", "数据采集", "降噪对比", "诊断结果", "历史记录", "模型信息"]

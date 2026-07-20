@@ -77,6 +77,13 @@ class CaptureResult:
 
 
 @dataclass
+class MultiChannelCaptureResult:
+    raw_voltage: Any
+    sample_rate: int
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class DiagnosisProgress:
     stage: str
     percent: int

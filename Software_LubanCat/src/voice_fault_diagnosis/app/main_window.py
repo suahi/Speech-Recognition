@@ -45,8 +45,17 @@ except Exception as exc:  # pragma: no cover
 from voice_fault_diagnosis.app.denoise_comparison import ComparisonWaveformWidget
 from voice_fault_diagnosis.app.waveform_display import WaveformDisplay, calculate_waveform_display
 from voice_fault_diagnosis.audio_io import voltage_to_audio
-from voice_fault_diagnosis.capture.vk701n import Vk701nCaptureSession, resolve_sdk_library
+from voice_fault_diagnosis.capture.vk701n import (
+    SUPPORTED_INPUT_RANGES,
+    Vk701nCaptureSession,
+    resolve_sdk_library,
+)
 from voice_fault_diagnosis.config import load_json, save_json
+from voice_fault_diagnosis.diagnostics.sound_capture import (
+    CaptureCheckReport,
+    CaptureCheckResult,
+    save_capture_check,
+)
 from voice_fault_diagnosis.inference.legacy_cnn import LegacyCnnEngine
 from voice_fault_diagnosis.models import (
     AnalysisSource,
@@ -55,10 +64,11 @@ from voice_fault_diagnosis.models import (
     DenoiseResult,
     DiagnosisProgress,
     HardwareConfig,
+    MultiChannelCaptureResult,
     StoredCapture,
     WorkflowState,
 )
-from voice_fault_diagnosis.paths import CONFIG_DIR, LEGACY_MODEL_DIR
+from voice_fault_diagnosis.paths import CAPTURE_CHECKS_DIR, CONFIG_DIR, LEGACY_MODEL_DIR
 from voice_fault_diagnosis.pipeline import run_analysis, run_denoise
 from voice_fault_diagnosis.storage.local_records import LocalRecordStore
 
@@ -214,6 +224,75 @@ class CaptureWorker(QObject):
         self.stop_event.set()
 
 
+class SoundCheckCaptureWorker(QObject):
+    progress_changed = Signal(int, str)
+    completed = Signal(object)
+    failed = Signal(str, str)
+    done = Signal()
+
+    def __init__(self, hardware: HardwareConfig, duration_seconds: float, stage_label: str) -> None:
+        super().__init__()
+        self.hardware = hardware
+        self.duration_seconds = float(duration_seconds)
+        self.stage_label = stage_label
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            session = Vk701nCaptureSession(self.hardware)
+
+            def on_chunk(_voltage: np.ndarray, info: dict[str, object]) -> None:
+                received = int(info.get("received_samples") or 0)
+                target = max(1, int(info.get("target_samples") or 1))
+                percent = min(100, int(round(received / target * 100)))
+                self.progress_changed.emit(percent, f"{self.stage_label}：已采集 {received}/{target} 点")
+
+            result = session.capture_all_channels(self.duration_seconds, on_chunk=on_chunk)
+            if result.raw_voltage.shape[0] == 0:
+                raise RuntimeError("未采集到四通道电压数据")
+            self.completed.emit(result)
+        except Exception as exc:
+            self.failed.emit(f"{type(exc).__name__}: {exc}", traceback.format_exc())
+        finally:
+            self.done.emit()
+
+
+class SoundCheckAnalysisWorker(QObject):
+    progress_changed = Signal(int, str)
+    completed = Signal(object)
+    failed = Signal(str, str)
+    done = Signal()
+
+    def __init__(
+        self,
+        quiet: MultiChannelCaptureResult,
+        noise: MultiChannelCaptureResult,
+        hardware: HardwareConfig,
+    ) -> None:
+        super().__init__()
+        self.quiet = quiet
+        self.noise = noise
+        self.hardware = hardware
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            result = save_capture_check(
+                self.quiet.raw_voltage,
+                self.noise.raw_voltage,
+                self.hardware,
+                quiet_metadata=self.quiet.metadata,
+                noise_metadata=self.noise.metadata,
+                output_root=CAPTURE_CHECKS_DIR,
+                progress_callback=self.progress_changed.emit,
+            )
+            self.completed.emit(result)
+        except Exception as exc:
+            self.failed.emit(f"{type(exc).__name__}: {exc}", traceback.format_exc())
+        finally:
+            self.done.emit()
+
+
 class DenoiseWorker(QObject):
     progress_changed = Signal(object)
     completed = Signal(object, object)
@@ -293,6 +372,231 @@ class AnalysisWorker(QObject):
             self.failed.emit(f"{type(exc).__name__}: {exc}", traceback.format_exc())
         finally:
             self.done.emit()
+
+
+class SoundCaptureCheckDialog(QDialog):
+    recommendation_applied = Signal(int, float)
+
+    def __init__(self, hardware: HardwareConfig, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.hardware = hardware
+        self.quiet_result: MultiChannelCaptureResult | None = None
+        self.noise_result: MultiChannelCaptureResult | None = None
+        self.check_result: CaptureCheckResult | None = None
+        self._thread: QThread | None = None
+        self._worker: QObject | None = None
+        self._analyze_when_idle = False
+
+        self.setWindowTitle("声音采集链路自检")
+        self.resize(980, 680)
+        layout = QVBoxLayout(self)
+        title = QLabel("先证明采到了声音，再进入模型流程")
+        title.setObjectName("DialogTitle")
+        instructions = QLabel(
+            "自检会分别采集 5 秒安静基线和 5 秒机械噪声，并同时比较 CH1 至 CH4。"
+            "请在第二阶段持续制造可重复的机械声。"
+        )
+        instructions.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(instructions)
+
+        self.status_label = QLabel("第 1 步：保持现场安静，点击“采集安静基线”。")
+        self.status_label.setObjectName("StatusLabel")
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setFormat("自检进度 %p%")
+        layout.addWidget(self.status_label)
+        layout.addWidget(self.progress_bar)
+
+        self.table = QTableWidget(0, 8)
+        self.table.setHorizontalHeaderLabels(
+            ["通道", "结论", "安静 AC RMS", "噪声 AC RMS", "AC 增量", "频带增量", "噪声峰值", "削波"]
+        )
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionMode(QAbstractItemView.NoSelection)
+        layout.addWidget(self.table)
+
+        self.summary = QPlainTextEdit()
+        self.summary.setReadOnly(True)
+        self.summary.setMinimumHeight(145)
+        self.summary.setPlainText(
+            "自检完成后会显示通道和量程建议。monitor.wav 只用于电脑试听，不会进入模型。"
+        )
+        layout.addWidget(self.summary)
+
+        self.output_label = QLabel("报告目录：尚未生成")
+        self.output_label.setObjectName("MutedLabel")
+        self.output_label.setWordWrap(True)
+        layout.addWidget(self.output_label)
+
+        actions = QHBoxLayout()
+        self.quiet_button = QPushButton("1. 采集安静基线")
+        self.quiet_button.setProperty("role", "secondary")
+        self.noise_button = QPushButton("2. 采集机械噪声")
+        self.noise_button.setProperty("role", "secondary")
+        self.apply_button = QPushButton("应用推荐通道和量程")
+        self.close_button = QPushButton("关闭")
+        self.close_button.setProperty("role", "secondary")
+        self.quiet_button.clicked.connect(lambda: self._start_capture_stage("quiet"))
+        self.noise_button.clicked.connect(lambda: self._start_capture_stage("noise"))
+        self.apply_button.clicked.connect(self._apply_recommendation)
+        self.close_button.clicked.connect(self.accept)
+        actions.addWidget(self.quiet_button)
+        actions.addWidget(self.noise_button)
+        actions.addStretch(1)
+        actions.addWidget(self.apply_button)
+        actions.addWidget(self.close_button)
+        layout.addLayout(actions)
+        self._update_controls()
+
+    def reject(self) -> None:
+        if self._thread is not None:
+            QMessageBox.warning(self, "自检正在运行", "请等待当前采集或报告生成完成。")
+            return
+        super().reject()
+
+    def _start_capture_stage(self, stage: str) -> None:
+        if self._thread is not None:
+            return
+        if stage == "noise" and self.quiet_result is None:
+            return
+        if stage == "quiet":
+            self.quiet_result = None
+            self.noise_result = None
+            self.check_result = None
+            self.table.setRowCount(0)
+            self.output_label.setText("报告目录：尚未生成")
+            self.summary.setPlainText("正在采集安静基线，请保持现场安静。")
+            label = "安静基线"
+        else:
+            self.noise_result = None
+            self.check_result = None
+            self.summary.setPlainText("正在采集机械噪声，请在整个阶段持续制造可重复的机械声。")
+            label = "机械噪声"
+        self.progress_bar.setValue(0)
+        self.status_label.setText(f"正在连接采集卡并采集{label}...")
+        worker = SoundCheckCaptureWorker(self.hardware, 5.0, label)
+        worker.progress_changed.connect(self._on_progress)
+        worker.completed.connect(lambda result, current_stage=stage: self._on_stage_completed(current_stage, result))
+        worker.failed.connect(self._on_failed)
+        self._launch_worker(worker)
+
+    def _on_stage_completed(self, stage: str, result_obj: object) -> None:
+        if not isinstance(result_obj, MultiChannelCaptureResult):
+            self._on_failed("采集结果格式无效", "Expected MultiChannelCaptureResult")
+            return
+        self.progress_bar.setValue(100)
+        if stage == "quiet":
+            self.quiet_result = result_obj
+            self.status_label.setText("安静基线已完成。第 2 步：准备持续制造机械噪声。")
+        else:
+            self.noise_result = result_obj
+            self.status_label.setText("两阶段采集已完成，正在分析四通道并生成试听文件...")
+            self._analyze_when_idle = True
+
+    def _start_analysis(self) -> None:
+        if self.quiet_result is None or self.noise_result is None or self._thread is not None:
+            return
+        self.progress_bar.setValue(0)
+        worker = SoundCheckAnalysisWorker(self.quiet_result, self.noise_result, self.hardware)
+        worker.progress_changed.connect(self._on_progress)
+        worker.completed.connect(self._on_analysis_completed)
+        worker.failed.connect(self._on_failed)
+        self._launch_worker(worker)
+
+    def _on_analysis_completed(self, result_obj: object) -> None:
+        if not isinstance(result_obj, CaptureCheckResult):
+            self._on_failed("分析结果格式无效", "Expected CaptureCheckResult")
+            return
+        self.check_result = result_obj
+        self.progress_bar.setValue(100)
+        self.status_label.setText(result_obj.report.overall_message)
+        self.output_label.setText(f"报告目录：{result_obj.output_dir}")
+        self.summary.setPlainText(
+            (result_obj.output_dir / "summary.txt").read_text(encoding="utf-8")
+        )
+        self._populate_table(result_obj.report)
+
+    def _populate_table(self, report: CaptureCheckReport) -> None:
+        self.table.setRowCount(len(report.channels))
+        for row, comparison in enumerate(report.channels):
+            values = [
+                f"CH{comparison.channel}",
+                _capture_check_status_text(comparison.status),
+                _format_volts(comparison.quiet.ac_rms_volts),
+                _format_volts(comparison.noise.ac_rms_volts),
+                f"{comparison.ac_rms_increase_db:.2f} dB",
+                f"{comparison.band_power_increase_db:.2f} dB",
+                _format_volts(comparison.noise.peak_abs_volts),
+                f"{comparison.noise.clipping_ratio * 100.0:.4f}%",
+            ]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if comparison.channel == report.recommended_channel:
+                    item.setBackground(QColor("#dff5ef"))
+                self.table.setItem(row, column, item)
+
+    def _apply_recommendation(self) -> None:
+        if self.check_result is None:
+            return
+        report = self.check_result.report
+        self.hardware.adc_channel = int(report.recommended_channel)
+        self.hardware.input_range_volts = float(report.recommended_input_range_volts)
+        self.recommendation_applied.emit(
+            self.hardware.adc_channel,
+            self.hardware.input_range_volts,
+        )
+        self.quiet_result = None
+        self.noise_result = None
+        self.check_result = None
+        self.table.setRowCount(0)
+        self.progress_bar.setValue(0)
+        self.status_label.setText("推荐参数已应用。请从安静基线开始重新自检，确认新量程不削波。")
+        self.summary.setPlainText(
+            f"已应用 CH{self.hardware.adc_channel}、{self.hardware.input_range_volts:g} V。"
+            "参数尚未自动保存，重新自检通过后再关闭窗口并保存硬件设置。"
+        )
+        self._update_controls()
+
+    def _on_progress(self, percent: int, message: str) -> None:
+        self.progress_bar.setValue(max(0, min(100, int(percent))))
+        self.status_label.setText(message)
+
+    def _on_failed(self, message: str, details: str) -> None:
+        self._analyze_when_idle = False
+        self.status_label.setText(f"自检失败：{message}")
+        self.summary.setPlainText(details)
+        QMessageBox.critical(self, "声音采集自检失败", message)
+
+    def _launch_worker(self, worker: QObject) -> None:
+        thread = QThread(self)
+        self._thread = thread
+        self._worker = worker
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.done.connect(thread.quit)
+        worker.done.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._clear_worker)
+        thread.start()
+        self._update_controls()
+
+    def _clear_worker(self) -> None:
+        self._thread = None
+        self._worker = None
+        should_analyze = self._analyze_when_idle
+        self._analyze_when_idle = False
+        self._update_controls()
+        if should_analyze:
+            QTimer.singleShot(0, self._start_analysis)
+
+    def _update_controls(self) -> None:
+        busy = self._thread is not None
+        self.quiet_button.setEnabled(not busy)
+        self.noise_button.setEnabled(not busy and self.quiet_result is not None)
+        self.apply_button.setEnabled(not busy and self.check_result is not None)
+        self.close_button.setEnabled(not busy)
 
 
 class PostCaptureDialog(QDialog):
@@ -474,6 +778,11 @@ class MainWindow(QMainWindow):
         self.sample_rate_spin = _spin(cfg.sample_rate, 1, 100000)
         self.bit_mode_spin = _spin(cfg.bit_mode, 8, 32)
         self.channel_spin = _spin(cfg.adc_channel, 1, 4)
+        self.input_range_combo = QComboBox()
+        for range_volts in SUPPORTED_INPUT_RANGES:
+            self.input_range_combo.addItem(f"{range_volts:g} V", float(range_volts))
+        range_index = self.input_range_combo.findData(float(cfg.input_range_volts))
+        self.input_range_combo.setCurrentIndex(max(0, range_index))
         self.frame_spin = _spin(cfg.read_frame_count, 1, 200000)
         self.gain_spin = _double_spin(cfg.gain, 0.001, 100.0, 3)
         self.blocking_spin = _spin(cfg.blocking_timeout_ms, 1, 10000)
@@ -489,6 +798,7 @@ class MainWindow(QMainWindow):
         form.addRow("采样率 Hz", self.sample_rate_spin)
         form.addRow("位深", self.bit_mode_spin)
         form.addRow("ADC 通道", self.channel_spin)
+        form.addRow("输入量程", self.input_range_combo)
         form.addRow("每次读取点数", self.frame_spin)
         form.addRow("legacy 增益", self.gain_spin)
         form.addRow("阻塞超时 ms", self.blocking_spin)
@@ -498,11 +808,15 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
 
         actions = QHBoxLayout()
+        self.sound_check_button = QPushButton("采集链路自检")
+        self.sound_check_button.setProperty("role", "secondary")
+        self.sound_check_button.clicked.connect(self._open_sound_check)
         save_button = QPushButton("保存设置")
         save_button.setProperty("role", "secondary")
         save_button.clicked.connect(lambda: self._save_hardware_config(show_message=True))
         next_button = QPushButton("保存并进入采集")
         next_button.clicked.connect(self._save_hardware_and_next)
+        actions.addWidget(self.sound_check_button)
         actions.addWidget(save_button)
         actions.addStretch(1)
         actions.addWidget(next_button)
@@ -788,6 +1102,7 @@ class MainWindow(QMainWindow):
                 "server_port": int(self.port_spin.value()),
                 "device_no": int(self.device_spin.value()),
                 "adc_channel": int(self.channel_spin.value()),
+                "input_range_volts": float(self.input_range_combo.currentData()),
                 "sample_rate": int(self.sample_rate_spin.value()),
                 "bit_mode": int(self.bit_mode_spin.value()),
                 "read_frame_count": int(self.frame_spin.value()),
@@ -1157,6 +1472,7 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(not worker_busy and self.state in {WorkflowState.IDLE, WorkflowState.FAILED})
         self.stop_button.setEnabled(self.state == WorkflowState.CAPTURING and isinstance(self._job_worker, CaptureWorker))
         self.hardware_group.setEnabled(not busy)
+        self.sound_check_button.setEnabled(not busy and not worker_busy)
         show_post_actions = has_capture and self.state not in {WorkflowState.CAPTURING, WorkflowState.ANALYZING}
         self.post_capture_group.setVisible(show_post_actions)
         self.resample_button.setEnabled(show_post_actions and not worker_busy)
@@ -1392,6 +1708,23 @@ class MainWindow(QMainWindow):
         if path:
             self.sdk_path.setText(path)
 
+    def _open_sound_check(self) -> None:
+        if self._job_thread is not None:
+            QMessageBox.warning(self, "后台任务运行中", "请等待当前采集或分析任务结束。")
+            return
+        dialog = SoundCaptureCheckDialog(self._hardware_config(), parent=self)
+        dialog.recommendation_applied.connect(self._apply_sound_check_recommendation)
+        dialog.exec()
+
+    def _apply_sound_check_recommendation(self, channel: int, input_range_volts: float) -> None:
+        self.channel_spin.setValue(int(channel))
+        range_index = self.input_range_combo.findData(float(input_range_volts))
+        if range_index >= 0:
+            self.input_range_combo.setCurrentIndex(range_index)
+        self.capture_status.setText(
+            f"自检建议已应用：CH{int(channel)}、{float(input_range_volts):g} V；请重新自检后保存设置"
+        )
+
     def _save_hardware_config(self, *, show_message: bool) -> None:
         save_json(self._hardware_config_path, self._hardware_config().to_dict())
         if show_message:
@@ -1436,6 +1769,16 @@ def _status_text(status: str) -> str:
 
 def _analysis_source_text(source: str) -> str:
     return {"raw": "原始信号", "denoised": "降噪信号"}.get(source, source or "-")
+
+
+def _capture_check_status_text(status: str) -> str:
+    return {
+        "strong": "明确响应",
+        "likely": "较大概率响应",
+        "inconclusive": "证据不足",
+        "clipped": "发生削波",
+        "invalid": "采集无效",
+    }.get(status, status or "未知")
 
 
 def _format_volts(value: float) -> str:

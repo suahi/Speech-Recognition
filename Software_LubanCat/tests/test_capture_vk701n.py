@@ -177,6 +177,29 @@ def test_vk701n_capture_ignores_zero_reads_and_reports_progress() -> None:
     assert result.metadata["positive_read_count"] >= 2
 
 
+def test_vk701n_multichannel_capture_preserves_all_four_channels() -> None:
+    sdk = FakeVkSdk()
+    config = HardwareConfig(
+        capture_seconds=0.001,
+        sample_rate=50000,
+        read_frame_count=5000,
+        preflight_cleanup_delay_s=0.0,
+        post_initialize_delay_s=0.0,
+        post_start_delay_s=0.0,
+    )
+    session = Vk701nCaptureSession(config, sdk=sdk)
+
+    result = session.capture_all_channels(0.001)
+
+    assert result.raw_voltage.shape == (50, 4)
+    np.testing.assert_allclose(result.raw_voltage[:5, 0], np.array([0, 1, 2, 3, 4]))
+    np.testing.assert_allclose(result.raw_voltage[:5, 1], 99.0)
+    np.testing.assert_allclose(result.raw_voltage[:5, 2], 98.0)
+    np.testing.assert_allclose(result.raw_voltage[:5, 3], 97.0)
+    assert result.metadata["channel_count"] == 4
+    assert result.metadata["received_samples"] == 50
+
+
 def test_vk701n_fixed_initialize_profile_is_available_for_field_debugging() -> None:
     sdk = FakeVkSdk()
     config = HardwareConfig(
@@ -193,6 +216,25 @@ def test_vk701n_fixed_initialize_profile_is_available_for_field_debugging() -> N
     assert result.raw_voltage.size == 50
     assert sdk.params == [50000, 4, 24, 0, 1, 1, 1, 1, 0, 0, 0, 0]
     assert result.metadata["startup_profile"] == "fixed"
+
+
+def test_vk701n_windows_initialize_uses_selected_input_range() -> None:
+    sdk = FakeVkSdk()
+    config = HardwareConfig(
+        capture_seconds=0.001,
+        sample_rate=50000,
+        input_range_volts=0.1,
+        initialize_all_profile="windows_c_example",
+        post_initialize_delay_s=0.0,
+        post_start_delay_s=0.0,
+    )
+    session = Vk701nCaptureSession(config, sdk=sdk)
+
+    result = session.capture()
+
+    assert sdk.initialize_params == (0, 4.0, 1, 50000, 5, 5, 5, 5)
+    assert result.metadata["range_code"] == 5
+    assert result.metadata["active_initialize_params"]["range_ch1"] == 5
 
 
 def test_vk701n_preflight_cleanup_failure_does_not_block_startup() -> None:
