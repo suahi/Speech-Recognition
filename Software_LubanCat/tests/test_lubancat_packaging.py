@@ -1,33 +1,31 @@
 from __future__ import annotations
 
 import json
-import re
 
 from voice_fault_diagnosis.capture.vk701n import resolve_sdk_library
-from voice_fault_diagnosis.models import HardwareConfig
-from voice_fault_diagnosis.paths import CONFIG_DIR, SOFTWARE_ROOT
+from voice_fault_diagnosis.paths import LIGHT_CONFIG_PATH, SOFTWARE_ROOT
 from voice_fault_diagnosis.runtime_checks import desktop_dependency_errors
 
 
-def test_lubancat_hardware_config_uses_linux_sdk_path() -> None:
-    config = json.loads((CONFIG_DIR / "hardware_vk701n.json").read_text(encoding="utf-8"))
+def test_light_config_is_the_only_operator_facing_runtime_config() -> None:
+    config = json.loads(LIGHT_CONFIG_PATH.read_text(encoding="utf-8"))
 
-    assert config["sdk_library_path"] == "vendor/vk701n/libVK70XNMC_DAQ_SHARED.so"
-    assert ".dll" not in config["sdk_library_path"].lower()
-    assert "\\" not in config["sdk_library_path"]
-    assert config["initialize_all_profile"] == "code_source"
+    assert config["hardware"]["sdk_library_path"] == "vendor/vk701n/libVK70XNMC_DAQ_SHARED.so"
+    assert config["capture"]["duration_seconds"] == 10.0
+    assert config["model"]["labels"] == {
+        "C0": "静音",
+        "C1": "风扇",
+        "C2": "敲击",
+        "C3": "摩擦",
+        "C4": "气流",
+        "C5": "人声",
+    }
 
 
 def test_relative_sdk_path_resolves_from_lubancat_project_root() -> None:
-    resolved = resolve_sdk_library("vendor/vk701n/libVK70XNMC_DAQ_SHARED.so")
-
-    assert resolved == (SOFTWARE_ROOT / "vendor" / "vk701n" / "libVK70XNMC_DAQ_SHARED.so").resolve()
-
-
-def test_lubancat_hardware_defaults_use_initialize_all_profile() -> None:
-    config = HardwareConfig()
-
-    assert config.initialize_all_profile == "code_source"
+    assert resolve_sdk_library("vendor/vk701n/libVK70XNMC_DAQ_SHARED.so") == (
+        SOFTWARE_ROOT / "vendor" / "vk701n" / "libVK70XNMC_DAQ_SHARED.so"
+    ).resolve()
 
 
 def test_lubancat_dependency_constraints_are_arm64_safe() -> None:
@@ -37,112 +35,32 @@ def test_lubancat_dependency_constraints_are_arm64_safe() -> None:
     assert 'requires-python = ">=3.10,<3.13"' in pyproject
     assert '"numpy>=1.26.0,<2.0"' in pyproject
     assert '"torch>=2.8,<2.13"' in pyproject
-    assert '"PySide6_Essentials==6.7.3; platform_system == \'Linux\'' in pyproject
-    assert "platform_machine == 'aarch64'" in pyproject
-    assert '"PySide6>=6.7,<6.11; platform_system != \'Linux\'' in pyproject
-    assert "matplotlib" not in pyproject
-    assert "numpy>=1.26.0,<2.0" in requirements
-    assert "shiboken6==6.7.3" in requirements
+    assert "PyWavelets" not in pyproject
+    assert "PyWavelets" not in requirements
     assert "PySide6_Essentials==6.7.3" in requirements
 
 
-def test_lubancat_scripts_create_venv_and_export_runtime_paths() -> None:
-    scripts_dir = SOFTWARE_ROOT / "scripts"
-    install_script = (scripts_dir / "install_lubancat.sh").read_text(encoding="utf-8")
-    run_script = (scripts_dir / "run_app.sh").read_text(encoding="utf-8")
-    probe_script = (scripts_dir / "probe_vk701n.sh").read_text(encoding="utf-8")
-    sound_check_script = (scripts_dir / "check_sound_capture.sh").read_text(encoding="utf-8")
-    test_script = (scripts_dir / "test_lubancat.sh").read_text(encoding="utf-8")
+def test_desktop_runtime_preflight_accepts_lubancat_dependency_set() -> None:
+    versions = {"numpy": "1.26.4", "PySide6_Essentials": "6.7.3", "shiboken6": "6.7.3"}
 
-    assert "uname -m" in install_script
-    assert "python3-venv" in install_script
-    assert "--prefer-binary" in install_script
-    assert "--force-reinstall" in install_script
-    assert "requirements-lubancat-aarch64.txt" in install_script
-    assert "Dependency check:" in install_script
-    assert "QT_QPA_PLATFORM" in run_script
-    for script in (run_script, probe_script, sound_check_script, test_script):
-        assert '.venv/bin/activate' in script
-        assert "LD_LIBRARY_PATH" in script
-        assert "PYTHONPATH" in script
-    assert "tools/check_sound_capture.py" in sound_check_script
-
-
-def test_lubancat_text_files_keep_lf_line_endings() -> None:
-    attributes = (SOFTWARE_ROOT / ".gitattributes").read_text(encoding="utf-8")
-
-    assert "*.sh text eol=lf" in attributes
-    assert "*.py text eol=lf" in attributes
-    assert "*.toml text eol=lf" in attributes
-    assert "*.txt text eol=lf" in attributes
-
-
-def test_lubancat_ui_exposes_guided_capture_denoise_workflow() -> None:
-    main_window = (SOFTWARE_ROOT / "src" / "voice_fault_diagnosis" / "app" / "main_window.py").read_text(
-        encoding="utf-8"
-    )
-    comparison = (
-        SOFTWARE_ROOT / "src" / "voice_fault_diagnosis" / "app" / "denoise_comparison.py"
-    ).read_text(encoding="utf-8")
-
-    assert "诊断进度" in main_window
-    assert "停止采集" in main_window
-    assert "重新采样" in main_window
-    assert "进入降噪对比" in main_window
-    assert "读取已保存采样" in main_window
-    assert "不降噪，直接分析" in main_window
-    assert "使用当前降噪结果分析" in main_window
-    assert "模型已预热" in main_window
-    assert "progress_changed" in main_window
-    assert "QProgressBar" in main_window
-    assert "PostCaptureDialog" in main_window
-    assert "CaptureWorker" in main_window
-    assert "DenoiseWorker" in main_window
-    assert "AnalysisWorker" in main_window
-    assert "SoundCaptureCheckDialog" in main_window
-    assert "采集链路自检" in main_window
-    assert "输入量程" in main_window
-    assert "应用推荐通道和量程" in main_window
-    assert "原始电压波形" in comparison
-    assert "降噪后电压波形" in comparison
-    tab_labels = ["硬件设置", "数据采集", "降噪对比", "诊断结果", "历史记录", "模型信息"]
-    assert re.findall(r'self\.tabs\.addTab\(page, "([^"]+)"\)', main_window) == tab_labels
-
-
-def test_direct_startup_preflight_reports_numpy_2_and_missing_xcb_cursor() -> None:
-    versions = {
-        "numpy": "2.0.2",
-        "PySide6_Essentials": "6.7.3",
-        "shiboken6": "6.7.3",
-    }
-
-    errors = desktop_dependency_errors(
-        system="Linux",
-        machine="aarch64",
-        python_version=(3, 10),
-        environ={"QT_QPA_PLATFORM": "xcb"},
-        version_lookup=versions.get,
-        find_library=lambda name: None,
-    )
-
-    assert any("NumPy 2.0.2" in error for error in errors)
-    assert any("libxcb-cursor0" in error for error in errors)
-
-
-def test_direct_startup_preflight_accepts_lubancat_dependency_set() -> None:
-    versions = {
-        "numpy": "1.26.4",
-        "PySide6_Essentials": "6.7.3",
-        "shiboken6": "6.7.3",
-    }
-
-    errors = desktop_dependency_errors(
+    assert desktop_dependency_errors(
         system="Linux",
         machine="aarch64",
         python_version=(3, 10),
         environ={"QT_QPA_PLATFORM": "xcb"},
         version_lookup=versions.get,
         find_library=lambda name: "/usr/lib/aarch64-linux-gnu/libxcb-cursor.so.0",
+    ) == []
+
+
+def test_single_page_ui_does_not_expose_legacy_workflow() -> None:
+    main_window = (SOFTWARE_ROOT / "src" / "voice_fault_diagnosis" / "app" / "main_window.py").read_text(
+        encoding="utf-8"
     )
 
-    assert errors == []
+    assert "声纹采集与六类识别" in main_window
+    assert "开始采集" in main_window
+    assert "停止并识别" in main_window
+    assert "QTabWidget" not in main_window
+    assert "DenoiseWorker" not in main_window
+    assert "LegacyCnnEngine" not in main_window

@@ -10,7 +10,6 @@ from typing import Any, Callable
 
 import numpy as np
 
-from voice_fault_diagnosis.legacy_format import voltage_to_legacy_bytes
 from voice_fault_diagnosis.models import CaptureResult, HardwareConfig, MultiChannelCaptureResult
 from voice_fault_diagnosis.paths import SOFTWARE_ROOT, VENDOR_VK701N_DIR
 
@@ -274,7 +273,6 @@ class Vk701nCaptureSession:
         target_seconds = float(duration_seconds if duration_seconds is not None else cfg.capture_seconds)
         target_samples = max(1, int(cfg.sample_rate * target_seconds))
         raw_chunks: list[np.ndarray] = []
-        legacy = bytearray()
         read_calls = 0
         zero_read_count = 0
         positive_read_count = 0
@@ -337,7 +335,6 @@ class Vk701nCaptureSession:
                 remaining = target_samples - received_samples
                 kept = voltage[:remaining].astype(np.float32, copy=False)
                 raw_chunks.append(kept)
-                legacy.extend(voltage_to_legacy_bytes(kept, gain=cfg.gain))
                 received_samples += int(kept.size)
                 if on_chunk is not None:
                     on_chunk(
@@ -364,7 +361,6 @@ class Vk701nCaptureSession:
             elapsed = max(0.0, time.monotonic() - started_at)
             return CaptureResult(
                 raw_voltage=raw_voltage,
-                legacy_input=bytes(legacy),
                 sample_rate=int(cfg.sample_rate),
                 metadata={
                     **self.runtime_metadata(),

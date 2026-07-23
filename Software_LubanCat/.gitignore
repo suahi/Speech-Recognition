@@ -3,4 +3,3 @@ __pycache__/
 .pytest_cache/
 .pytest_tmp/
 data/records/
-data/capture_checks/

@@ -151,7 +151,6 @@ def test_vk701n_capture_sequence_and_ch1_extraction() -> None:
     assert result.metadata["preflight_cleanup_enabled"] is False
     assert result.metadata["preflight_stop_sampling_status"] is None
     assert result.metadata["preflight_tcp_close_status"] is None
-    assert len(result.legacy_input) == 50
 
 
 def test_vk701n_capture_ignores_zero_reads_and_reports_progress() -> None:

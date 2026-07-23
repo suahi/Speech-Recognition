@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
-
-
-AnalysisSource = Literal["raw", "denoised"]
+from typing import Any
 
 
 @dataclass
 class HardwareConfig:
+    """VK701N-SD parameters loaded from the single light-app config file."""
+
     sdk_library_path: str = ""
     server_port: int = 8234
     device_no: int = 0
@@ -42,36 +40,8 @@ class HardwareConfig:
 
 
 @dataclass
-class DenoiseConfig:
-    enabled: bool = True
-    bandpass_enabled: bool = False
-    bandpass_low_hz: float = 20.0
-    bandpass_high_hz: float = 20000.0
-    bandpass_order: int = 4
-    wavelet_enabled: bool = False
-    wavelet: str = "db4"
-    wavelet_level: int = 3
-    wavelet_threshold: str = "soft"
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "DenoiseConfig":
-        fields = cls.__dataclass_fields__
-        return cls(**{key: data[key] for key in fields if key in data})
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass
-class CaptureChunk:
-    voltage: Any
-    metadata: dict[str, Any]
-
-
-@dataclass
 class CaptureResult:
     raw_voltage: Any
-    legacy_input: bytes
     sample_rate: int
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -81,43 +51,6 @@ class MultiChannelCaptureResult:
     raw_voltage: Any
     sample_rate: int
     metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class DiagnosisProgress:
-    stage: str
-    percent: int
-    message: str
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass
-class DenoiseResult:
-    processed_audio: Any
-    config: DenoiseConfig
-    metadata: dict[str, Any] = field(default_factory=dict)
-    metrics: dict[str, float] = field(default_factory=dict)
-
-
-@dataclass
-class StoredCapture:
-    capture: CaptureResult
-    hardware_config: HardwareConfig
-    record_dir: Path
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-class WorkflowState(str, Enum):
-    IDLE = "idle"
-    CAPTURING = "capturing"
-    CAPTURED = "captured"
-    DENOISING = "denoising"
-    READY_TO_ANALYZE = "ready_to_analyze"
-    ANALYZING = "analyzing"
-    COMPLETED = "completed"
-    FAILED = "failed"
 
 
 @dataclass

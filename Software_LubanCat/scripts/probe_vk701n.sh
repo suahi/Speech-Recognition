@@ -14,7 +14,7 @@ export PYTHONPATH="${PROJECT_ROOT}/src:${PYTHONPATH:-}"
 
 cd "${PROJECT_ROOT}"
 exec python tools/probe_vk701n.py \
-  --profile legacy \
+  --profile legacy_initialize_all \
   --library vendor/vk701n/libVK70XNMC_DAQ_SHARED.so \
   --port 8234 \
   --device-no 0 \

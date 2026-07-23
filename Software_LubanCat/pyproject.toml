@@ -7,7 +7,6 @@ dependencies = [
     # Keep the legacy audio/model stack on NumPy 1.x for LubanCat ARM64.
     "numpy>=1.26.0,<2.0",
     "scipy>=1.11.4,<1.13",
-    "PyWavelets>=1.5,<1.7",
     "librosa>=0.10.1,<0.11",
     # PyPI provides Linux aarch64 wheels from torch 2.8 onward.
     "torch>=2.8,<2.13",

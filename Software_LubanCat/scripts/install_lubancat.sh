@@ -74,7 +74,6 @@ if [[ "${system_name}" == "Linux" && "${is_arm64}" == "1" ]]; then
   python -m pip install --upgrade --force-reinstall --prefer-binary \
     "numpy>=1.26.0,<2.0" \
     "scipy>=1.11.4,<1.13" \
-    "PyWavelets>=1.5,<1.7" \
     "shiboken6==6.7.3" \
     "PySide6_Essentials==6.7.3"
   python -m pip install --upgrade --prefer-binary -r "${REQUIREMENTS_FILE}"
@@ -88,7 +87,6 @@ import platform
 
 import librosa
 import numpy
-import pywt
 import scipy
 import torch
 from PySide6 import QtCore, QtWidgets
@@ -97,7 +95,6 @@ print("Dependency check:")
 print(f"  python={platform.python_version()} machine={platform.machine()}")
 print(f"  numpy={numpy.__version__}")
 print(f"  scipy={scipy.__version__}")
-print(f"  pywavelets={pywt.__version__}")
 print(f"  librosa={librosa.__version__}")
 print(f"  torch={torch.__version__}")
 print(f"  Qt={QtCore.qVersion()} widgets={QtWidgets.__name__}")
