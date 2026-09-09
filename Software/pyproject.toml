@@ -1,19 +1,18 @@
 [project]
 name = "voice-fault-diagnosis"
-version = "0.1.0"
-description = "Local-file acoustic fault diagnosis system for VK701N-SD voiceprint voltage acquisition."
-requires-python = ">=3.10"
+version = "0.2.0"
+description = "Windows direct-connected VK701N-SD capture and six-class WAV diagnosis demo."
+requires-python = ">=3.10,<3.13"
 dependencies = [
-    "numpy",
-    "scipy",
-    "PyWavelets",
-    "librosa",
-    "torch",
+    "numpy>=1.26",
+    "librosa>=0.10,<0.12",
+    "soundfile>=0.12",
+    "torch>=2.0",
 ]
 
 [project.optional-dependencies]
-desktop = ["PySide6", "matplotlib"]
-test = ["pytest"]
+desktop = ["PySide6>=6.7,<6.12"]
+test = ["pytest>=8,<9"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

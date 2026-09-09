@@ -3,7 +3,6 @@ from __future__ import annotations
 import ctypes
 from contextlib import contextmanager
 import os
-import platform
 from pathlib import Path
 import threading
 import time
@@ -11,9 +10,8 @@ from typing import Any, Callable
 
 import numpy as np
 
-from voice_fault_diagnosis.legacy_format import voltage_to_legacy_bytes
-from voice_fault_diagnosis.models import CaptureResult, HardwareConfig
-from voice_fault_diagnosis.paths import VENDOR_VK701N_DIR
+from voice_fault_diagnosis.models import CaptureResult, HardwareConfig, MultiChannelCaptureResult
+from voice_fault_diagnosis.paths import SOFTWARE_ROOT, VENDOR_VK701N_DIR
 
 
 class Vk701nError(RuntimeError):
@@ -21,6 +19,18 @@ class Vk701nError(RuntimeError):
 
 
 _SDK_LOCK = threading.RLock()
+
+INPUT_RANGE_CODES = {
+    10.0: 0,
+    5.0: 1,
+    2.5: 2,
+    1.0: 3,
+    0.5: 4,
+    0.1: 5,
+    0.02: 6,
+    0.001: 7,
+}
+SUPPORTED_INPUT_RANGES = tuple(INPUT_RANGE_CODES)
 
 
 class CtypesVk701nSdk:
@@ -263,7 +273,6 @@ class Vk701nCaptureSession:
         target_seconds = float(duration_seconds if duration_seconds is not None else cfg.capture_seconds)
         target_samples = max(1, int(cfg.sample_rate * target_seconds))
         raw_chunks: list[np.ndarray] = []
-        legacy = bytearray()
         read_calls = 0
         zero_read_count = 0
         positive_read_count = 0
@@ -326,7 +335,6 @@ class Vk701nCaptureSession:
                 remaining = target_samples - received_samples
                 kept = voltage[:remaining].astype(np.float32, copy=False)
                 raw_chunks.append(kept)
-                legacy.extend(voltage_to_legacy_bytes(kept, gain=cfg.gain))
                 received_samples += int(kept.size)
                 if on_chunk is not None:
                     on_chunk(
@@ -353,7 +361,6 @@ class Vk701nCaptureSession:
             elapsed = max(0.0, time.monotonic() - started_at)
             return CaptureResult(
                 raw_voltage=raw_voltage,
-                legacy_input=bytes(legacy),
                 sample_rate=int(cfg.sample_rate),
                 metadata={
                     **self.runtime_metadata(),
@@ -372,25 +379,146 @@ class Vk701nCaptureSession:
         finally:
             self.stop()
 
+    def capture_all_channels(
+        self,
+        duration_seconds: float,
+        on_chunk: Callable[[np.ndarray, dict[str, Any]], None] | None = None,
+        stop_event: threading.Event | None = None,
+    ) -> MultiChannelCaptureResult:
+        cfg = self.config
+        target_seconds = float(duration_seconds)
+        if target_seconds <= 0:
+            raise ValueError("duration_seconds must be positive")
+        target_samples = max(1, int(cfg.sample_rate * target_seconds))
+        raw_chunks: list[np.ndarray] = []
+        read_calls = 0
+        zero_read_count = 0
+        positive_read_count = 0
+        received_samples = 0
+        started_at = time.monotonic()
+        last_positive_at = started_at
+        stopped_by_user = False
+        last_recv_lengths: list[int] = []
+
+        try:
+            self.start()
+            started_at = time.monotonic()
+            last_positive_at = started_at
+            while received_samples < target_samples:
+                if stop_event is not None and stop_event.is_set():
+                    stopped_by_user = True
+                    break
+
+                seconds_since_last_data = time.monotonic() - last_positive_at
+                if seconds_since_last_data >= float(cfg.zero_read_timeout_s):
+                    raise Vk701nError(
+                        "DAQ multichannel read timed out: "
+                        f"received_samples={received_samples}, "
+                        f"target_samples={target_samples}, "
+                        f"read_calls={read_calls}, "
+                        f"zero_read_count={zero_read_count}, "
+                        f"last_recv_lengths={last_recv_lengths[-20:]}"
+                    )
+
+                recv_len, voltage = self.read_all_channels_chunk(cfg.read_frame_count)
+                read_calls += 1
+                last_recv_lengths.append(int(recv_len))
+                last_recv_lengths = last_recv_lengths[-20:]
+                if recv_len == 0:
+                    zero_read_count += 1
+                    if on_chunk is not None:
+                        on_chunk(
+                            np.zeros((0, cfg.adc_total_channels), dtype=np.float32),
+                            {
+                                "recv_len": 0,
+                                "received_samples": received_samples,
+                                "target_samples": target_samples,
+                                "read_calls": read_calls,
+                                "zero_read_count": zero_read_count,
+                                "positive_read_count": positive_read_count,
+                                "seconds_since_last_data": seconds_since_last_data,
+                            },
+                        )
+                    if cfg.poll_interval_s > 0:
+                        time.sleep(float(cfg.poll_interval_s))
+                    continue
+
+                positive_read_count += 1
+                last_positive_at = time.monotonic()
+                remaining = target_samples - received_samples
+                kept = voltage[:remaining, :].astype(np.float32, copy=False)
+                raw_chunks.append(kept)
+                received_samples += int(kept.shape[0])
+                if on_chunk is not None:
+                    on_chunk(
+                        kept,
+                        {
+                            "recv_len": int(recv_len),
+                            "chunk_samples": int(kept.shape[0]),
+                            "received_samples": received_samples,
+                            "target_samples": target_samples,
+                            "read_calls": read_calls,
+                            "zero_read_count": zero_read_count,
+                            "positive_read_count": positive_read_count,
+                            "seconds_since_last_data": 0.0,
+                        },
+                    )
+
+            raw_voltage = (
+                np.concatenate(raw_chunks, axis=0).astype(np.float32, copy=False)
+                if raw_chunks
+                else np.zeros((0, cfg.adc_total_channels), dtype=np.float32)
+            )
+            elapsed = max(0.0, time.monotonic() - started_at)
+            return MultiChannelCaptureResult(
+                raw_voltage=raw_voltage,
+                sample_rate=int(cfg.sample_rate),
+                metadata={
+                    **self.runtime_metadata(),
+                    "target_samples": int(target_samples),
+                    "received_samples": int(raw_voltage.shape[0]),
+                    "requested_duration_seconds": float(target_seconds),
+                    "actual_capture_seconds": elapsed,
+                    "actual_audio_seconds": raw_voltage.shape[0] / float(cfg.sample_rate),
+                    "read_calls": int(read_calls),
+                    "zero_read_count": int(zero_read_count),
+                    "positive_read_count": int(positive_read_count),
+                    "last_recv_lengths": list(last_recv_lengths),
+                    "stopped_by_user": bool(stopped_by_user),
+                    "channel_count": int(cfg.adc_total_channels),
+                },
+            )
+        finally:
+            self.stop()
+
     def read_voltage_chunk(self, frame_count: int) -> tuple[int, np.ndarray]:
+        cfg = self.config
+        if not 1 <= cfg.adc_channel <= cfg.adc_total_channels:
+            raise ValueError("adc_channel must be between 1 and adc_total_channels")
+
+        used, all_channels = self.read_all_channels_chunk(frame_count)
+        if used == 0:
+            return 0, np.zeros(0, dtype=np.float32)
+        voltage = all_channels[:, cfg.adc_channel - 1]
+        return used, voltage.astype(np.float32, copy=True)
+
+    def read_all_channels_chunk(self, frame_count: int) -> tuple[int, np.ndarray]:
         if self._sdk is None:
             raise RuntimeError("SDK is not loaded")
         cfg = self.config
         if cfg.adc_total_channels != 4:
             raise ValueError("VK70xNMC_GetFourChannel requires adc_total_channels=4")
-        if not 1 <= cfg.adc_channel <= cfg.adc_total_channels:
-            raise ValueError("adc_channel must be between 1 and adc_total_channels")
 
         raw_buffer = self._get_buffer(frame_count * cfg.adc_total_channels)
         recv_len = int(self._sdk.get_four_channel(cfg.device_no, raw_buffer, int(frame_count)))
         if recv_len < 0:
             raise Vk701nError(f"GetFourChannel failed with status {recv_len}")
         if recv_len == 0:
-            return 0, np.zeros(0, dtype=np.float32)
+            return 0, np.zeros((0, cfg.adc_total_channels), dtype=np.float32)
 
         used = min(int(recv_len), int(frame_count))
         interleaved = np.ctypeslib.as_array(raw_buffer)[: used * cfg.adc_total_channels]
-        voltage = interleaved.reshape(used, cfg.adc_total_channels)[:, cfg.adc_channel - 1]
+        voltage = interleaved.reshape(used, cfg.adc_total_channels)
         return used, voltage.astype(np.float32, copy=True)
 
     def runtime_metadata(self) -> dict[str, Any]:
@@ -428,8 +556,15 @@ class Vk701nCaptureSession:
     def _ensure_sdk(self) -> Any:
         if self._sdk is not None:
             return self._sdk
+        if os.name != "nt":
+            raise Vk701nError("实时采集仅支持 Windows 64 位电脑；WAV 文件识别不受影响。")
         self._library_path = resolve_sdk_library(self.config.sdk_library_path)
-        self._sdk = CtypesVk701nSdk(self._library_path)
+        if not self._library_path.is_file():
+            raise Vk701nError(f"找不到采集卡 SDK DLL：{self._library_path}")
+        try:
+            self._sdk = CtypesVk701nSdk(self._library_path)
+        except OSError as exc:
+            raise Vk701nError(f"无法加载采集卡 SDK DLL，请确认 Python 与 DLL 均为 64 位：{self._library_path}") from exc
         return self._sdk
 
     def _wait_for_device(self, sdk: Any) -> None:
@@ -444,7 +579,9 @@ class Vk701nCaptureSession:
                 return
             if time.monotonic() >= deadline:
                 raise Vk701nError(
-                    f"DAQ connection timed out: status={last_status}, connected={last_count}"
+                    "等待采集卡连接超时，请检查直连网线、采集卡电源、电脑 IP 192.168.1.188/24、"
+                    f"TCP {self.config.server_port} 防火墙规则及厂家程序占用情况；"
+                    f"SDK 状态={last_status}，已连接设备数={last_count}。"
                 )
             time.sleep(0.02)
 
@@ -493,14 +630,15 @@ class Vk701nCaptureSession:
         if profile in {"windows_c_example", "windows_initialize", "initialize"}:
             if not self._sdk_has_initialize(sdk):
                 raise Vk701nError("VK70xNMC_Initialize is not exported by this SDK")
+            range_code = self._input_range_code()
             params = {
                 "ref_voltage": 4.0,
                 "bit_mode": 1,
                 "sample_rate": int(cfg.sample_rate),
-                "range_ch1": 0,
-                "range_ch2": 0,
-                "range_ch3": 0,
-                "range_ch4": 0,
+                "range_ch1": range_code,
+                "range_ch2": range_code,
+                "range_ch3": range_code,
+                "range_ch4": range_code,
             }
             self._active_initialize_method = "VK70xNMC_Initialize"
             self._active_initialize_params = dict(params)
@@ -564,21 +702,11 @@ class Vk701nCaptureSession:
             return f"{action} exception: {type(exc).__name__}: {exc}"
 
     def _input_range_code(self) -> int:
-        range_map = {
-            10.0: 0,
-            5.0: 1,
-            2.5: 2,
-            1.0: 3,
-            0.5: 4,
-            0.1: 5,
-            0.02: 6,
-            0.001: 7,
-        }
         requested = float(self.config.input_range_volts)
-        for volts, code in range_map.items():
+        for volts, code in INPUT_RANGE_CODES.items():
             if abs(requested - volts) <= 1e-9:
                 return code
-        supported = ", ".join(str(value).rstrip("0").rstrip(".") for value in range_map)
+        supported = ", ".join(str(value).rstrip("0").rstrip(".") for value in INPUT_RANGE_CODES)
         raise Vk701nError(f"unsupported input_range_volts={requested}; supported values: {supported}")
 
     def _get_buffer(self, required: int) -> Any:
@@ -596,7 +724,8 @@ class Vk701nCaptureSession:
 
 def resolve_sdk_library(configured_path: str = "") -> Path:
     if configured_path:
-        return Path(configured_path).expanduser().resolve()
-    if platform.system().lower().startswith("win"):
-        return (VENDOR_VK701N_DIR / "VK70xNMC_DAQ2.dll").resolve()
-    return (VENDOR_VK701N_DIR / "libVK70XNMC_DAQ_SHARED.so").resolve()
+        path = Path(configured_path).expanduser()
+        if not path.is_absolute():
+            path = SOFTWARE_ROOT / path
+        return path.resolve()
+    return (VENDOR_VK701N_DIR / "VK70xNMC_DAQ2.dll").resolve()

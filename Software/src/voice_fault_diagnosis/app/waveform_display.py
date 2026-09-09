@@ -6,6 +6,7 @@ import numpy as np
 
 
 MIN_DISPLAY_SPAN_VOLTS = 0.001
+MIN_COMPARISON_HALF_SPAN_VOLTS = 0.0005
 
 
 @dataclass(frozen=True)
@@ -23,6 +24,29 @@ class WaveformDisplay:
     display_scale: float
     mode_name: str
     is_envelope: bool = False
+
+
+@dataclass(frozen=True)
+class SharedWaveformScale:
+    center_volts: float
+    half_span_volts: float
+
+
+def calculate_shared_scale(raw_voltage: np.ndarray) -> SharedWaveformScale:
+    raw = np.asarray(raw_voltage, dtype=np.float32).reshape(-1)
+    if raw.size == 0:
+        return SharedWaveformScale(center_volts=0.0, half_span_volts=1.0)
+    center = float(np.mean(raw))
+    centered = raw - center
+    p1, p99 = np.percentile(centered, [1.0, 99.0])
+    ac_rms = float(np.sqrt(np.mean(centered.astype(np.float64) ** 2)))
+    half_span = max(
+        abs(float(p1)),
+        abs(float(p99)),
+        ac_rms * 3.0,
+        MIN_COMPARISON_HALF_SPAN_VOLTS,
+    )
+    return SharedWaveformScale(center_volts=center, half_span_volts=half_span)
 
 
 def calculate_waveform_display(
