@@ -1,13 +1,16 @@
 [project]
 name = "voice-fault-diagnosis"
-version = "0.2.0"
-description = "Windows direct-connected VK701N-SD capture and six-class WAV diagnosis demo."
+version = "0.3.0"
+description = "Offline bearing-audio diagnosis and demonstrative health-index desktop app."
 requires-python = ">=3.10,<3.13"
 dependencies = [
     "numpy>=1.26",
     "librosa>=0.10,<0.12",
     "soundfile>=0.12",
-    "torch>=2.0",
+    "scipy>=1.12,<1.16",
+    "imageio-ffmpeg>=0.5,<0.7",
+    "scikit-learn>=1.5,<1.7",
+    "joblib>=1.4,<1.6",
 ]
 
 [project.optional-dependencies]

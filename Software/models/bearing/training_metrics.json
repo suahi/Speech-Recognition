@@ -1,0 +1,91 @@
+{
+  "model_version": "bearing_rf_v1",
+  "random_seed": 20260920,
+  "data_root_not_recorded": true,
+  "file_counts": {
+    "train": {
+      "total": 42,
+      "healthy": 7,
+      "bearing_damage": 34,
+      "clearance": 1
+    },
+    "test": {
+      "total": 11,
+      "healthy": 2,
+      "bearing_damage": 8,
+      "clearance": 1
+    }
+  },
+  "segment_counts": {
+    "train": 553,
+    "test": 150
+  },
+  "classification": {
+    "file_count": 11,
+    "accuracy": 0.8181818181818182,
+    "macro_f1": 0.5185185185185185,
+    "confusion_matrix_labels": [
+      "healthy",
+      "bearing_damage",
+      "clearance"
+    ],
+    "confusion_matrix": [
+      [
+        1,
+        1,
+        0
+      ],
+      [
+        0,
+        8,
+        0
+      ],
+      [
+        0,
+        1,
+        0
+      ]
+    ],
+    "per_class": {
+      "healthy": {
+        "precision": 1.0,
+        "recall": 0.5,
+        "f1-score": 0.6666666666666666,
+        "support": 2.0
+      },
+      "bearing_damage": {
+        "precision": 0.8,
+        "recall": 1.0,
+        "f1-score": 0.8888888888888888,
+        "support": 8.0
+      },
+      "clearance": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1-score": 0.0,
+        "support": 1.0
+      },
+      "accuracy": 0.8181818181818182,
+      "macro avg": {
+        "precision": 0.6,
+        "recall": 0.5,
+        "f1-score": 0.5185185185185185,
+        "support": 11.0
+      },
+      "weighted avg": {
+        "precision": 0.7636363636363637,
+        "recall": 0.8181818181818182,
+        "f1-score": 0.7676767676767677,
+        "support": 11.0
+      }
+    },
+    "health_index_min": 33,
+    "health_index_max": 85
+  },
+  "health_index_disclaimer": "演示性健康指数，不能替代真实寿命小时数。",
+  "limitations": [
+    "健康指数为演示性百分比，不是以小时计的真实剩余寿命。",
+    "间隙异常原始文件仅 2 段，测试集中仅 1 段，该类别泛化结论仅供演示。",
+    "训练/测试按原始文件隔离；5 秒片段只用于各自分区的特征扩充。"
+  ]
+}

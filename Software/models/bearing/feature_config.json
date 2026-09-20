@@ -1,0 +1,92 @@
+{
+  "feature_version": "bearing_acoustic_v1",
+  "target_sample_rate": 16000,
+  "segment_seconds": 5.0,
+  "feature_names": [
+    "mfcc_1_mean",
+    "mfcc_1_std",
+    "mfcc_2_mean",
+    "mfcc_2_std",
+    "mfcc_3_mean",
+    "mfcc_3_std",
+    "mfcc_4_mean",
+    "mfcc_4_std",
+    "mfcc_5_mean",
+    "mfcc_5_std",
+    "mfcc_6_mean",
+    "mfcc_6_std",
+    "mfcc_7_mean",
+    "mfcc_7_std",
+    "mfcc_8_mean",
+    "mfcc_8_std",
+    "mfcc_9_mean",
+    "mfcc_9_std",
+    "mfcc_10_mean",
+    "mfcc_10_std",
+    "mfcc_11_mean",
+    "mfcc_11_std",
+    "mfcc_12_mean",
+    "mfcc_12_std",
+    "mfcc_13_mean",
+    "mfcc_13_std",
+    "spectral_centroid_mean",
+    "spectral_centroid_std",
+    "spectral_bandwidth_mean",
+    "spectral_bandwidth_std",
+    "spectral_rolloff_mean",
+    "spectral_rolloff_std",
+    "spectral_flatness_mean",
+    "spectral_flatness_std",
+    "zero_crossing_rate_mean",
+    "zero_crossing_rate_std",
+    "rms_mean",
+    "rms_std",
+    "amplitude_mean",
+    "amplitude_std",
+    "amplitude_kurtosis",
+    "peak_factor",
+    "crest_factor"
+  ],
+  "health_bands": {
+    "healthy": [
+      76,
+      93
+    ],
+    "bearing_damage": [
+      31,
+      47
+    ],
+    "clearance": [
+      6,
+      18
+    ]
+  },
+  "health_disclaimer": "演示性健康指数，不能替代真实寿命小时数。",
+  "random_seed": 20260920,
+  "anomaly_feature_names": [
+    "rms_mean",
+    "spectral_centroid_mean",
+    "spectral_flatness_mean",
+    "zero_crossing_rate_mean",
+    "amplitude_kurtosis"
+  ],
+  "anomaly_median": [
+    0.05762843042612076,
+    1312.8324584960938,
+    0.010318712797015905,
+    0.061437636613845825,
+    4.131963729858398
+  ],
+  "anomaly_scale": [
+    0.025623880816251037,
+    454.77252854003905,
+    0.008073317621508612,
+    0.025335090919956563,
+    0.7541463245630264
+  ],
+  "anomaly_references": {
+    "healthy": 2.2939988162998484,
+    "bearing_damage": 9.154222785328372,
+    "clearance": 4.024439529246536
+  }
+}
