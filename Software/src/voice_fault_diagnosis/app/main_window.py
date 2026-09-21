@@ -3,12 +3,13 @@ from __future__ import annotations
 import csv
 import os
 from pathlib import Path
+from time import monotonic
 import traceback
 
 import numpy as np
 
 try:
-    from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
+    from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
     from PySide6.QtGui import QColor, QFont, QPainter, QPen
     from PySide6.QtWidgets import (
         QApplication,
@@ -28,7 +29,11 @@ except ImportError as exc:  # pragma: no cover - exercised only without desktop 
     raise RuntimeError("桌面界面依赖未安装，请运行：python -m pip install -e .[desktop]") from exc
 
 from voice_fault_diagnosis.config import BearingAppConfig, BearingConfigError, load_bearing_config
-from voice_fault_diagnosis.app.waveform_display import WaveformDisplay, calculate_waveform_display
+from voice_fault_diagnosis.app.waveform_display import (
+    calculate_playback_envelope,
+    looped_playback_position,
+    normalize_playback_samples,
+)
 from voice_fault_diagnosis.inference.bearing import BearingDiagnosticEngine
 from voice_fault_diagnosis.models import CLASS_IDS
 from voice_fault_diagnosis.paths import BEARING_MODEL_DIR
@@ -93,73 +98,128 @@ class ProbabilityChartWidget(QWidget):
 
 
 class AudioWaveformWidget(QWidget):
-    """Full-audio normalized waveform with bounded envelope rendering."""
+    """A visual-only, continuously looping five-second oscilloscope view."""
+
+    playback_window_seconds = 5.0
+    playback_interval_ms = 33
+    scope_background = "#10202D"
+    scope_trace = "#00A7D8"
+    scope_cursor = "#21D4FD"
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("audio_waveform")
         self.setMinimumHeight(220)
-        self._display: WaveformDisplay | None = None
+        self._normalized_samples = np.zeros(0, dtype=np.float32)
+        self._sample_rate = 16_000
         self._duration_seconds = 0.0
+        self._playback_seconds = 0.0
+        self._last_tick: float | None = None
+        self._playback_timer = QTimer(self)
+        self._playback_timer.setInterval(self.playback_interval_ms)
+        self._playback_timer.timeout.connect(self._on_playback_tick)
+
+    @property
+    def is_playing(self) -> bool:
+        return self._playback_timer.isActive()
+
+    @property
+    def playback_seconds(self) -> float:
+        return self._playback_seconds
 
     def set_audio(self, samples: np.ndarray, sample_rate: int) -> None:
-        values = np.asarray(samples, dtype=np.float32).reshape(-1)
-        self._duration_seconds = values.size / float(max(1, sample_rate))
-        self._display = calculate_waveform_display(
-            values,
-            adaptive=True,
-            full_scale_volts=1.0,
-            max_points=2_400,
-            min_span_volts=1e-5,
-        )
+        self._normalized_samples = normalize_playback_samples(samples, min_span=1e-5)
+        self._sample_rate = max(1, int(sample_rate))
+        self._duration_seconds = self._normalized_samples.size / float(self._sample_rate)
+        self._playback_seconds = 0.0
+        self._last_tick = monotonic()
+        if self._duration_seconds > 0.0:
+            self._playback_timer.start()
+        else:
+            self._playback_timer.stop()
         self.update()
+
+    def stop_playback(self, *, release_samples: bool = False) -> None:
+        self._playback_timer.stop()
+        self._last_tick = None
+        if release_samples:
+            self._normalized_samples = np.zeros(0, dtype=np.float32)
+            self._duration_seconds = 0.0
+            self._playback_seconds = 0.0
+
+    @Slot()
+    def _on_playback_tick(self) -> None:
+        if self._duration_seconds <= 0.0:
+            self.stop_playback()
+            return
+        now = monotonic()
+        previous_tick = self._last_tick if self._last_tick is not None else now
+        self._playback_seconds = looped_playback_position(
+            self._playback_seconds,
+            now - previous_tick,
+            self._duration_seconds,
+        )
+        self._last_tick = now
+        self.update()
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self.stop_playback(release_samples=True)
+        super().closeEvent(event)
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor("#FFFFFF"))
-        painter.setPen(QPen(QColor(BORDER), 1))
+        painter.fillRect(self.rect(), QColor(self.scope_background))
+        painter.setPen(QPen(QColor("#536779"), 1))
         painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
-        if self._display is None or self._display.samples.size == 0:
-            painter.setPen(QColor(MUTED))
+        if self._normalized_samples.size == 0:
+            painter.setPen(QColor("#AABACA"))
             painter.drawText(self.rect(), Qt.AlignCenter, "等待读取音频波形")
             return
 
-        plot = self.rect().adjusted(52, 15, -14, -34)
-        painter.setPen(QPen(QColor("#D9D9D9"), 1))
-        for value in (-1.0, -0.5, 0.0, 0.5, 1.0):
-            y = int(plot.center().y() - value * plot.height() / 2)
+        plot = self.rect().adjusted(48, 28, -14, -36)
+        painter.setPen(QPen(QColor("#263B4C"), 1))
+        for fraction in (0.0, 0.25, 0.5, 0.75, 1.0):
+            y = int(plot.top() + plot.height() * fraction)
+            x = int(plot.left() + plot.width() * fraction)
             painter.drawLine(plot.left(), y, plot.right(), y)
-            painter.setPen(QColor(MUTED))
-            painter.drawText(5, y + 4, f"{value:.1f}")
-            painter.setPen(QPen(QColor("#D9D9D9"), 1))
-        painter.setPen(QPen(QColor("#666666"), 1))
+            painter.drawLine(x, plot.top(), x, plot.bottom())
+        painter.setPen(QPen(QColor("#6F8798"), 1))
         painter.drawLine(plot.left(), plot.top(), plot.left(), plot.bottom())
         painter.drawLine(plot.left(), plot.bottom(), plot.right(), plot.bottom())
+        for value in (1.0, 0.5, 0.0, -0.5, -1.0):
+            y = int(plot.center().y() - value * plot.height() / 2)
+            painter.setPen(QColor("#AABACA"))
+            painter.drawText(4, y + 4, f"{value:.1f}")
 
-        duration = max(self._duration_seconds, 1e-9)
-        for fraction in (0.0, 0.25, 0.5, 0.75, 1.0):
+        envelope = calculate_playback_envelope(
+            self._normalized_samples,
+            sample_rate=self._sample_rate,
+            center_seconds=self._playback_seconds,
+            window_seconds=self.playback_window_seconds,
+            max_points=max(64, plot.width()),
+        )
+        painter.setPen(QPen(QColor(self.scope_trace), 1))
+        count = len(envelope.y_min_values)
+        for index, (minimum, maximum) in enumerate(zip(envelope.y_min_values, envelope.y_max_values, strict=True)):
+            x = int(plot.left() + plot.width() * index / max(1, count - 1))
+            y_min = int(plot.center().y() - float(minimum) * plot.height() / 2)
+            y_max = int(plot.center().y() - float(maximum) * plot.height() / 2)
+            painter.drawLine(x, y_min, x, y_max)
+
+        cursor_x = plot.center().x()
+        painter.setPen(QPen(QColor(self.scope_cursor), 1))
+        painter.drawLine(cursor_x, plot.top(), cursor_x, plot.bottom())
+        painter.setPen(QColor("#B9D7E5"))
+        painter.drawText(plot.left(), 18, "连续播放  ·  局部窗口 5.0 秒")
+        painter.drawText(
+            plot.right() - 116,
+            18,
+            f"{envelope.center_seconds:.2f} / {envelope.source_duration_seconds:.2f} 秒",
+        )
+        for fraction, label in ((0.0, "-2.5"), (0.5, "0.0"), (1.0, "+2.5")):
             x = int(plot.left() + plot.width() * fraction)
-            painter.drawLine(x, plot.bottom(), x, plot.bottom() + 4)
-            painter.drawText(x - 24, plot.bottom() + 19, 48, 14, Qt.AlignCenter, f"{duration * fraction:.1f}")
-        painter.setPen(QColor(MUTED))
-        painter.drawText(plot.center().x() - 25, self.height() - 4, "时间（秒）")
-
-        display = self._display
-        painter.setPen(QPen(QColor(BLUE), 1))
-        if display.is_envelope:
-            for index, (minimum, maximum) in enumerate(zip(display.y_min_values, display.y_max_values, strict=True)):
-                x = int(plot.left() + plot.width() * index / max(1, len(display.y_min_values) - 1))
-                y_min = int(plot.center().y() - float(minimum) * plot.height() / 2)
-                y_max = int(plot.center().y() - float(maximum) * plot.height() / 2)
-                painter.drawLine(x, y_min, x, y_max)
-        else:
-            previous = None
-            for index, value in enumerate(display.y_values):
-                x = int(plot.left() + plot.width() * index / max(1, len(display.y_values) - 1))
-                y = int(plot.center().y() - float(value) * plot.height() / 2)
-                if previous is not None:
-                    painter.drawLine(previous[0], previous[1], x, y)
-                previous = (x, y)
+            painter.drawText(x - 21, plot.bottom() + 20, 42, 14, Qt.AlignCenter, label)
+        painter.drawText(plot.center().x() - 35, self.height() - 4, "相对时间（秒）")
 
 
 class ImportWorker(QObject):
@@ -302,7 +362,7 @@ class MainWindow(QMainWindow):
         return group
 
     def _build_waveform_group(self) -> QGroupBox:
-        group = QGroupBox("音频波形")
+        group = QGroupBox("动态音频波形")
         group.setObjectName("waveform_group")
         layout = QVBoxLayout(group)
         layout.setContentsMargins(13, 20, 13, 13)
@@ -458,6 +518,10 @@ class MainWindow(QMainWindow):
 
     def _show_error(self, message: str, details: str) -> None:
         QMessageBox.critical(self, "音频识别失败", message)
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self.audio_waveform.stop_playback(release_samples=True)
+        super().closeEvent(event)
 
 
 def _field_title(text: str) -> QLabel:

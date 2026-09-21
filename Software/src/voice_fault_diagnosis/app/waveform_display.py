@@ -32,6 +32,17 @@ class SharedWaveformScale:
     half_span_volts: float
 
 
+@dataclass(frozen=True)
+class PlaybackEnvelope:
+    """One bounded, circular audio window ready for a scrolling scope."""
+
+    y_min_values: np.ndarray
+    y_max_values: np.ndarray
+    center_seconds: float
+    window_seconds: float
+    source_duration_seconds: float
+
+
 def calculate_shared_scale(raw_voltage: np.ndarray) -> SharedWaveformScale:
     raw = np.asarray(raw_voltage, dtype=np.float32).reshape(-1)
     if raw.size == 0:
@@ -49,6 +60,83 @@ def calculate_shared_scale(raw_voltage: np.ndarray) -> SharedWaveformScale:
     return SharedWaveformScale(center_volts=center, half_span_volts=half_span)
 
 
+def normalize_playback_samples(
+    samples: np.ndarray,
+    *,
+    min_span: float = MIN_DISPLAY_SPAN_VOLTS,
+) -> np.ndarray:
+    """Normalize one decoded file once for efficient repeated scope rendering."""
+
+    values = np.nan_to_num(
+        np.asarray(samples, dtype=np.float32).reshape(-1),
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
+    if values.size == 0:
+        return values
+    center = float(np.mean(values))
+    centered = values - center
+    p1, p99 = np.percentile(centered, [1.0, 99.0])
+    clipped = np.clip(centered, float(p1), float(p99))
+    robust_rms = float(np.sqrt(np.mean(clipped * clipped)))
+    half_span = max(abs(float(p1)), abs(float(p99)), robust_rms * 3.0, float(min_span) / 2.0)
+    return np.clip(centered / half_span, -1.0, 1.0).astype(np.float32, copy=False)
+
+
+def calculate_playback_envelope(
+    normalized_samples: np.ndarray,
+    *,
+    sample_rate: int,
+    center_seconds: float,
+    window_seconds: float = 5.0,
+    max_points: int = 600,
+) -> PlaybackEnvelope:
+    """Return a circular, pixel-bounded envelope centered on the playhead."""
+
+    values = np.nan_to_num(
+        np.asarray(normalized_samples, dtype=np.float32).reshape(-1),
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
+    rate = max(1, int(sample_rate))
+    window = max(0.1, float(window_seconds))
+    if values.size == 0:
+        empty = np.zeros(0, dtype=np.float32)
+        return PlaybackEnvelope(empty, empty, 0.0, window, 0.0)
+
+    source_duration = values.size / float(rate)
+    playhead = looped_playback_position(center_seconds, 0.0, source_duration)
+    window_samples = max(2, int(round(window * rate)))
+    center_index = int(round(playhead * rate))
+    start_index = center_index - window_samples // 2
+    indexes = np.mod(start_index + np.arange(window_samples, dtype=np.int64), values.size)
+    viewport = values[indexes]
+    bucket_size = int(np.ceil(viewport.size / float(max(2, int(max_points)))))
+    bucket_count = int(np.ceil(viewport.size / float(bucket_size)))
+    padded_size = bucket_count * bucket_size
+    if padded_size > viewport.size:
+        viewport = np.pad(viewport, (0, padded_size - viewport.size), mode="edge")
+    buckets = viewport.reshape(bucket_count, bucket_size)
+    return PlaybackEnvelope(
+        y_min_values=np.min(buckets, axis=1).astype(np.float32),
+        y_max_values=np.max(buckets, axis=1).astype(np.float32),
+        center_seconds=playhead,
+        window_seconds=window,
+        source_duration_seconds=source_duration,
+    )
+
+
+def looped_playback_position(position_seconds: float, elapsed_seconds: float, duration_seconds: float) -> float:
+    """Advance a visual-only playhead while continuously looping its source."""
+
+    duration = max(0.0, float(duration_seconds))
+    if duration <= 0.0:
+        return 0.0
+    return (max(0.0, float(position_seconds)) + max(0.0, float(elapsed_seconds))) % duration
+
+
 def calculate_waveform_display(
     voltage: np.ndarray,
     *,
@@ -57,7 +145,12 @@ def calculate_waveform_display(
     max_points: int = 5000,
     min_span_volts: float = MIN_DISPLAY_SPAN_VOLTS,
 ) -> WaveformDisplay:
-    raw_samples = np.asarray(voltage, dtype=np.float32).reshape(-1)
+    raw_samples = np.nan_to_num(
+        np.asarray(voltage, dtype=np.float32).reshape(-1),
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
 
     if raw_samples.size == 0:
         full_scale = max(float(full_scale_volts), float(min_span_volts) / 2.0)
@@ -139,17 +232,17 @@ def _prepare_display_series(
         display_y = y_values.astype(np.float32, copy=False)
         return display_samples, display_y, display_y, display_y, False
 
-    bucket_count = max_points
-    bucket_size = int(np.ceil(samples.size / float(bucket_count)))
+    bucket_size = int(np.ceil(samples.size / float(max_points)))
+    bucket_count = int(np.ceil(samples.size / float(bucket_size)))
     padded_size = bucket_count * bucket_size
     pad_count = padded_size - samples.size
     if pad_count:
-        padded_y = np.pad(y_values, (0, pad_count), mode="constant", constant_values=np.nan)
+        padded_y = np.pad(y_values, (0, pad_count), mode="edge")
     else:
         padded_y = y_values
     buckets = padded_y.reshape(bucket_count, bucket_size)
-    y_min = np.nanmin(buckets, axis=1).astype(np.float32)
-    y_max = np.nanmax(buckets, axis=1).astype(np.float32)
+    y_min = np.min(buckets, axis=1).astype(np.float32)
+    y_max = np.max(buckets, axis=1).astype(np.float32)
     sample_indexes = np.minimum(np.arange(bucket_count) * bucket_size, samples.size - 1)
     display_samples = samples[sample_indexes].astype(np.float32, copy=False)
 
