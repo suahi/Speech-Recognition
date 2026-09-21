@@ -5,7 +5,6 @@
   },
   "model": {
     "classifier_path": "models/bearing/bearing_classifier.joblib",
-    "health_index_path": "models/bearing/bearing_health_index.joblib",
     "feature_config_path": "models/bearing/feature_config.json",
     "model_version": "bearing_rf_v1",
     "labels": {

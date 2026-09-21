@@ -56,7 +56,6 @@ class LocalRecordStore:
             {
                 "record_id": metadata["record_id"],
                 "created_at": metadata["created_at"],
-                "health_index_disclaimer": prediction.metadata.get("health_disclaimer"),
             }
         )
         _write_json(result_path, result)

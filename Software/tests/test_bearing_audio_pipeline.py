@@ -65,16 +65,38 @@ def test_empty_and_broken_audio_return_clear_errors(tmp_path: Path) -> None:
         load_audio(broken)
 
 
-def test_pipeline_archives_original_audio_and_result(tmp_path: Path) -> None:
+def test_pipeline_decodes_once_archives_original_audio_and_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source = tmp_path / "bearing.wav"
     _write_wave(source, sample_rate=16_000)
     store = LocalRecordStore(tmp_path / "records")
-    record_dir, prediction = run_bearing_diagnosis(load_bearing_config(), source, store=store)
+    from voice_fault_diagnosis import pipeline
+
+    real_load_audio = pipeline.load_audio
+    calls = 0
+    previews: list[tuple[np.ndarray, object]] = []
+
+    def counted_load_audio(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_load_audio(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "load_audio", counted_load_audio)
+    record_dir, prediction = run_bearing_diagnosis(
+        load_bearing_config(),
+        source,
+        store=store,
+        on_preview=lambda values, info: previews.append((values, info)),
+    )
     assert (record_dir / "source.wav").is_file()
     metadata = json.loads((record_dir / "metadata.json").read_text(encoding="utf-8"))
     result = json.loads((record_dir / "result.json").read_text(encoding="utf-8"))
     assert metadata["source_type"] == "imported_bearing_audio"
     assert metadata["decode"]["decoded_sample_rate"] == 16_000
     assert metadata["segment_count"] == prediction.segment_count
-    assert result["health_index"] == prediction.health_index
-    assert "不能替代真实寿命" in result["health_index_disclaimer"]
+    assert calls == 1
+    assert len(previews) == 1
+    assert len(previews[0][0]) == 32_000
+    assert result["remaining_life_percent"] == prediction.remaining_life_percent
+    assert result["metadata"]["remaining_life_algorithm_version"] == "acoustic_degradation_v1"
+    assert "health_index_disclaimer" not in result
+    assert "health_disclaimer" not in metadata["model"]

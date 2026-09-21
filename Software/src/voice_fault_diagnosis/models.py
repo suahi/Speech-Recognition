@@ -16,8 +16,8 @@ class BearingPredictionResult:
     category_name: str
     confidence: float
     probabilities: dict[str, float]
-    health_index: int
-    health_level: str
+    remaining_life_percent: float
+    remaining_life_level: str
     segment_count: int
     metadata: dict[str, Any] = field(default_factory=dict)
 

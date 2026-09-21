@@ -13,16 +13,11 @@ from voice_fault_diagnosis.models import CLASS_IDS, BearingPredictionResult
 
 
 FEATURE_VERSION = "bearing_acoustic_v1"
-HEALTH_DISCLAIMER = "演示性健康指数，不能替代真实寿命小时数。"
-HEALTH_BANDS: dict[str, tuple[int, int]] = {
-    "healthy": (76, 93),
-    "bearing_damage": (31, 47),
-    "clearance": (6, 18),
-}
-HEALTH_LEVELS = {
-    "healthy": "健康",
-    "bearing_damage": "预警",
-    "clearance": "检修",
+REMAINING_LIFE_ALGORITHM_VERSION = "acoustic_degradation_v1"
+CLASS_RISK_WEIGHTS = {
+    "healthy": 0.02,
+    "bearing_damage": 0.68,
+    "clearance": 0.92,
 }
 
 
@@ -33,12 +28,11 @@ class AudioFeatures:
 
 
 class BearingDiagnosticEngine:
-    """Lazy, CPU-only three-class diagnosis and demonstrative health index."""
+    """Lazy, CPU-only three-class bearing diagnosis with acoustic life estimation."""
 
     def __init__(self, config: BearingAppConfig | BearingModelConfig) -> None:
         self.config = config.model if isinstance(config, BearingAppConfig) else config
         self._classifier: Any | None = None
-        self._health_regressor: Any | None = None
         self._feature_config: dict[str, Any] | None = None
 
     @property
@@ -47,9 +41,8 @@ class BearingDiagnosticEngine:
             "model_name": "bearing_random_forest",
             "model_version": self.config.model_version,
             "classifier_path": str(self.config.classifier_path),
-            "health_index_path": str(self.config.health_index_path),
             "feature_config_path": str(self.config.feature_config_path),
-            "health_disclaimer": HEALTH_DISCLAIMER,
+            "remaining_life_algorithm_version": REMAINING_LIFE_ALGORITHM_VERSION,
         }
 
     def prepare(self) -> None:
@@ -61,7 +54,6 @@ class BearingDiagnosticEngine:
             raise RuntimeError("缺少模型依赖 joblib，请重新安装项目依赖。") from exc
         for path, description in (
             (self.config.classifier_path, "分类模型"),
-            (self.config.health_index_path, "健康指数模型"),
             (self.config.feature_config_path, "特征配置"),
         ):
             if not path.is_file():
@@ -74,11 +66,9 @@ class BearingDiagnosticEngine:
         if not isinstance(names, list) or not names:
             raise ValueError("特征配置缺少 feature_names。")
         classifier = joblib.load(self.config.classifier_path)
-        health_regressor = joblib.load(self.config.health_index_path)
-        if not hasattr(classifier, "predict_proba") or not hasattr(health_regressor, "predict"):
+        if not hasattr(classifier, "predict_proba"):
             raise ValueError("轴承模型文件格式无效，请重新训练。")
         self._classifier = classifier
-        self._health_regressor = health_regressor
         self._feature_config = feature_config
 
     def predict(self, audio_path: str | Path) -> BearingPredictionResult:
@@ -94,13 +84,13 @@ class BearingDiagnosticEngine:
     ) -> BearingPredictionResult:
         self.prepare()
         assert self._classifier is not None
-        assert self._health_regressor is not None
         assert self._feature_config is not None
         segment_seconds = float(self._feature_config.get("segment_seconds", 5.0))
         feature_names = tuple(str(name) for name in self._feature_config["feature_names"])
         segments = segment_audio(samples, source_info.decoded_sample_rate, segment_seconds)
-        feature_rows = np.vstack([extract_features(segment, source_info.decoded_sample_rate).values for segment in segments])
-        if tuple(feature_names) != extract_features(segments[0], source_info.decoded_sample_rate).feature_names:
+        extracted = [extract_features(segment, source_info.decoded_sample_rate) for segment in segments]
+        feature_rows = np.vstack([item.values for item in extracted])
+        if tuple(feature_names) != extracted[0].feature_names:
             raise ValueError("当前特征实现与已训练模型不匹配，请重新训练模型。")
 
         probabilities_by_segment = np.asarray(self._classifier.predict_proba(feature_rows), dtype=float)
@@ -112,11 +102,12 @@ class BearingDiagnosticEngine:
             for class_id in CLASS_IDS
         }
         class_id = max(CLASS_IDS, key=lambda item: probability_map[item])
-        raw_health = float(np.mean(np.asarray(self._health_regressor.predict(feature_rows), dtype=float)))
         anomaly = acoustic_anomaly(feature_rows, self._feature_config)
-        severity_health = health_from_anomaly(class_id, anomaly, self._feature_config)
-        lower, upper = HEALTH_BANDS[class_id]
-        health_index = int(round(np.clip(0.70 * raw_health + 0.30 * severity_health, lower, upper)))
+        remaining_life_percent, remaining_life_level, class_risk, anomaly_risk = estimate_remaining_life(
+            probability_map,
+            anomaly,
+            self._feature_config,
+        )
         top_k = sorted(probability_map.items(), key=lambda item: item[1], reverse=True)
         metadata = {
             **self.model_metadata,
@@ -125,8 +116,10 @@ class BearingDiagnosticEngine:
             "segment_seconds": segment_seconds,
             "segment_count": len(segments),
             "feature_version": FEATURE_VERSION,
-            "raw_health_regression": raw_health,
             "acoustic_anomaly": anomaly,
+            "classification_risk": class_risk,
+            "acoustic_anomaly_risk": anomaly_risk,
+            "remaining_life_percent": remaining_life_percent,
             "top_k": [
                 {"class_id": item, "category_name": self.config.labels[item], "probability": value}
                 for item, value in top_k
@@ -138,8 +131,8 @@ class BearingDiagnosticEngine:
             category_name=self.config.labels[class_id],
             confidence=probability_map[class_id],
             probabilities=probability_map,
-            health_index=health_index,
-            health_level=HEALTH_LEVELS[class_id],
+            remaining_life_percent=remaining_life_percent,
+            remaining_life_level=remaining_life_level,
             segment_count=len(segments),
             metadata=metadata,
         )
@@ -233,12 +226,32 @@ def acoustic_anomaly(features: np.ndarray, feature_config: dict[str, Any]) -> fl
     return float(np.median(np.nan_to_num(score, nan=0.0, posinf=100.0, neginf=0.0)))
 
 
-def health_from_anomaly(class_id: str, anomaly: float, feature_config: dict[str, Any]) -> float:
-    lower, upper = HEALTH_BANDS[class_id]
-    references = feature_config.get("anomaly_references", {})
-    reference = max(float(references.get(class_id, 1.0)), 1e-6)
-    normalized = float(np.clip(anomaly / reference, 0.0, 1.0))
-    return float(upper - normalized * (upper - lower))
+def estimate_remaining_life(
+    probabilities: dict[str, float],
+    anomaly: float,
+    feature_config: dict[str, Any],
+) -> tuple[float, str, float, float]:
+    """Return a deterministic acoustic degradation estimate with two decimals.
+
+    No lifetime labels are available in the supplied data, so this is a fixed
+    calculation over classifier confidence and deviation from the healthy
+    acoustic baseline rather than a trained RUL regressor.
+    """
+
+    healthy_reference = max(float(feature_config.get("healthy_anomaly_reference", 1.0)), 1e-6)
+    classification_risk = float(
+        sum(max(0.0, float(probabilities.get(class_id, 0.0))) * weight for class_id, weight in CLASS_RISK_WEIGHTS.items())
+    )
+    acoustic_anomaly_risk = float(1.0 - np.exp(-max(0.0, float(anomaly)) / healthy_reference))
+    total_degradation = 0.72 * classification_risk + 0.28 * acoustic_anomaly_risk
+    remaining_life_percent = round(float(np.clip(100.0 * (1.0 - total_degradation), 3.0, 99.80)), 2)
+    if remaining_life_percent >= 70.0:
+        level = "健康"
+    elif remaining_life_percent >= 40.0:
+        level = "预警"
+    else:
+        level = "检修"
+    return remaining_life_percent, level, classification_risk, acoustic_anomaly_risk
 
 
 def _finite_mean(values: np.ndarray) -> float:

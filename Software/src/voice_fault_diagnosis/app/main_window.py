@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 import traceback
 
+import numpy as np
+
 try:
     from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
     from PySide6.QtGui import QColor, QFont, QPainter, QPen
@@ -26,7 +28,8 @@ except ImportError as exc:  # pragma: no cover - exercised only without desktop 
     raise RuntimeError("桌面界面依赖未安装，请运行：python -m pip install -e .[desktop]") from exc
 
 from voice_fault_diagnosis.config import BearingAppConfig, BearingConfigError, load_bearing_config
-from voice_fault_diagnosis.inference.bearing import BearingDiagnosticEngine, HEALTH_DISCLAIMER
+from voice_fault_diagnosis.app.waveform_display import WaveformDisplay, calculate_waveform_display
+from voice_fault_diagnosis.inference.bearing import BearingDiagnosticEngine
 from voice_fault_diagnosis.models import CLASS_IDS
 from voice_fault_diagnosis.paths import BEARING_MODEL_DIR
 from voice_fault_diagnosis.pipeline import run_bearing_diagnosis
@@ -89,8 +92,79 @@ class ProbabilityChartWidget(QWidget):
                 painter.drawText(center - 27, plot.bottom() - height - 19, 54, 15, Qt.AlignCenter, f"{value * 100:.1f}%")
 
 
+class AudioWaveformWidget(QWidget):
+    """Full-audio normalized waveform with bounded envelope rendering."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("audio_waveform")
+        self.setMinimumHeight(220)
+        self._display: WaveformDisplay | None = None
+        self._duration_seconds = 0.0
+
+    def set_audio(self, samples: np.ndarray, sample_rate: int) -> None:
+        values = np.asarray(samples, dtype=np.float32).reshape(-1)
+        self._duration_seconds = values.size / float(max(1, sample_rate))
+        self._display = calculate_waveform_display(
+            values,
+            adaptive=True,
+            full_scale_volts=1.0,
+            max_points=2_400,
+            min_span_volts=1e-5,
+        )
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor("#FFFFFF"))
+        painter.setPen(QPen(QColor(BORDER), 1))
+        painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
+        if self._display is None or self._display.samples.size == 0:
+            painter.setPen(QColor(MUTED))
+            painter.drawText(self.rect(), Qt.AlignCenter, "等待读取音频波形")
+            return
+
+        plot = self.rect().adjusted(52, 15, -14, -34)
+        painter.setPen(QPen(QColor("#D9D9D9"), 1))
+        for value in (-1.0, -0.5, 0.0, 0.5, 1.0):
+            y = int(plot.center().y() - value * plot.height() / 2)
+            painter.drawLine(plot.left(), y, plot.right(), y)
+            painter.setPen(QColor(MUTED))
+            painter.drawText(5, y + 4, f"{value:.1f}")
+            painter.setPen(QPen(QColor("#D9D9D9"), 1))
+        painter.setPen(QPen(QColor("#666666"), 1))
+        painter.drawLine(plot.left(), plot.top(), plot.left(), plot.bottom())
+        painter.drawLine(plot.left(), plot.bottom(), plot.right(), plot.bottom())
+
+        duration = max(self._duration_seconds, 1e-9)
+        for fraction in (0.0, 0.25, 0.5, 0.75, 1.0):
+            x = int(plot.left() + plot.width() * fraction)
+            painter.drawLine(x, plot.bottom(), x, plot.bottom() + 4)
+            painter.drawText(x - 24, plot.bottom() + 19, 48, 14, Qt.AlignCenter, f"{duration * fraction:.1f}")
+        painter.setPen(QColor(MUTED))
+        painter.drawText(plot.center().x() - 25, self.height() - 4, "时间（秒）")
+
+        display = self._display
+        painter.setPen(QPen(QColor(BLUE), 1))
+        if display.is_envelope:
+            for index, (minimum, maximum) in enumerate(zip(display.y_min_values, display.y_max_values, strict=True)):
+                x = int(plot.left() + plot.width() * index / max(1, len(display.y_min_values) - 1))
+                y_min = int(plot.center().y() - float(minimum) * plot.height() / 2)
+                y_max = int(plot.center().y() - float(maximum) * plot.height() / 2)
+                painter.drawLine(x, y_min, x, y_max)
+        else:
+            previous = None
+            for index, value in enumerate(display.y_values):
+                x = int(plot.left() + plot.width() * index / max(1, len(display.y_values) - 1))
+                y = int(plot.center().y() - float(value) * plot.height() / 2)
+                if previous is not None:
+                    painter.drawLine(previous[0], previous[1], x, y)
+                previous = (x, y)
+
+
 class ImportWorker(QObject):
     stage_changed = Signal(str, int)
+    preview_ready = Signal(object, object)
     completed = Signal(str, object)
     failed = Signal(str, str)
     done = Signal()
@@ -117,6 +191,7 @@ class ImportWorker(QObject):
                 engine=self.engine,
                 store=self.store,
                 on_stage=lambda message, value: self.stage_changed.emit(message, value),
+                on_preview=lambda samples, info: self.preview_ready.emit(samples, info),
             )
             self.completed.emit(str(record_dir), prediction)
         except Exception as exc:
@@ -176,9 +251,9 @@ class MainWindow(QMainWindow):
 
         bottom = QHBoxLayout()
         bottom.setSpacing(10)
-        self.classification_group = self._build_classification_group()
+        self.waveform_group = self._build_waveform_group()
         self.health_group = self._build_health_group()
-        bottom.addWidget(self.classification_group, 4)
+        bottom.addWidget(self.waveform_group, 4)
         bottom.addWidget(self.health_group, 6)
         outer.addLayout(bottom, 5)
 
@@ -226,66 +301,39 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.probability_chart, 1)
         return group
 
-    def _build_classification_group(self) -> QGroupBox:
-        group = QGroupBox("故障分类结果")
-        group.setObjectName("classification_group")
+    def _build_waveform_group(self) -> QGroupBox:
+        group = QGroupBox("音频波形")
+        group.setObjectName("waveform_group")
         layout = QVBoxLayout(group)
         layout.setContentsMargins(13, 20, 13, 13)
-        layout.setSpacing(8)
-        self.category_label = QLabel("--")
-        self.category_label.setObjectName("category_result")
-        self.category_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.category_label)
-        self.confidence_label = QLabel("分类置信度：--")
-        self.confidence_label.setObjectName("classification_confidence")
-        self.confidence_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.confidence_label)
-        self.probability_bars: dict[str, QProgressBar] = {}
-        for class_id in CLASS_IDS:
-            row = QHBoxLayout()
-            label = QLabel(self.config.model.labels[class_id])
-            label.setMinimumWidth(72)
-            bar = QProgressBar()
-            bar.setObjectName(f"classification_probability_{class_id}")
-            bar.setRange(0, 10_000)
-            bar.setValue(0)
-            bar.setFormat("0.0%")
-            row.addWidget(label)
-            row.addWidget(bar, 1)
-            layout.addLayout(row)
-            self.probability_bars[class_id] = bar
-        layout.addStretch(1)
+        self.audio_waveform = AudioWaveformWidget()
+        layout.addWidget(self.audio_waveform, 1)
         return group
 
     def _build_health_group(self) -> QGroupBox:
-        group = QGroupBox("剩余寿命预测")
+        group = QGroupBox("算法估计剩余寿命")
         group.setObjectName("health_group")
         layout = QVBoxLayout(group)
         layout.setContentsMargins(18, 20, 18, 13)
         layout.setSpacing(9)
-        descriptor = QLabel("演示性剩余寿命健康指数")
-        descriptor.setObjectName("health_descriptor")
+        descriptor = QLabel("声学退化特征与分类概率综合估计")
+        descriptor.setObjectName("remaining_life_descriptor")
         descriptor.setAlignment(Qt.AlignCenter)
         layout.addWidget(descriptor)
-        self.health_index_label = QLabel("-- %")
-        self.health_index_label.setObjectName("health_index")
-        self.health_index_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.health_index_label)
-        self.health_bar = QProgressBar()
-        self.health_bar.setObjectName("health_bar")
-        self.health_bar.setRange(0, 100)
-        self.health_bar.setValue(0)
-        self.health_bar.setFormat("%p%")
-        layout.addWidget(self.health_bar)
-        self.health_level_label = QLabel("状态等级：--")
-        self.health_level_label.setObjectName("health_level")
-        self.health_level_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.health_level_label)
-        self.disclaimer_label = QLabel(HEALTH_DISCLAIMER)
-        self.disclaimer_label.setObjectName("health_disclaimer")
-        self.disclaimer_label.setWordWrap(True)
-        self.disclaimer_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.disclaimer_label)
+        self.remaining_life_label = QLabel("-- %")
+        self.remaining_life_label.setObjectName("remaining_life")
+        self.remaining_life_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.remaining_life_label)
+        self.remaining_life_bar = QProgressBar()
+        self.remaining_life_bar.setObjectName("remaining_life_bar")
+        self.remaining_life_bar.setRange(0, 10_000)
+        self.remaining_life_bar.setValue(0)
+        self.remaining_life_bar.setFormat("0.00%")
+        layout.addWidget(self.remaining_life_bar)
+        self.remaining_life_level_label = QLabel("状态等级：--")
+        self.remaining_life_level_label.setObjectName("remaining_life_level")
+        self.remaining_life_level_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.remaining_life_level_label)
         self.record_label = QLabel("记录目录：--")
         self.record_label.setObjectName("record_path")
         self.record_label.setWordWrap(True)
@@ -311,12 +359,9 @@ class MainWindow(QMainWindow):
             QLabel[fieldTitle="true"] {{ color: #454545; font-size: 12px; font-weight: bold; }}
             QProgressBar {{ min-height: 20px; border: 1px solid #A8A8A8; border-radius: 0; background: #FFFFFF; text-align: center; color: {TEXT}; }}
             QProgressBar::chunk {{ background: {BLUE}; }}
-            QLabel#category_result {{ font-size: 27px; color: {BLUE_DARK}; font-weight: bold; min-height: 54px; }}
-            QLabel#classification_confidence {{ font-size: 16px; font-weight: bold; }}
-            QLabel#health_descriptor {{ color: #454545; font-size: 15px; font-weight: bold; }}
-            QLabel#health_index {{ font-size: 44px; color: {BLUE_DARK}; font-weight: bold; min-height: 64px; }}
-            QLabel#health_level {{ font-size: 17px; font-weight: bold; }}
-            QLabel#health_disclaimer {{ color: {MUTED}; font-size: 12px; }}
+            QLabel#remaining_life_descriptor {{ color: #454545; font-size: 15px; font-weight: bold; }}
+            QLabel#remaining_life {{ font-size: 44px; color: {BLUE_DARK}; font-weight: bold; min-height: 64px; }}
+            QLabel#remaining_life_level {{ font-size: 17px; font-weight: bold; }}
             QLabel#record_path {{ color: {MUTED}; font-size: 12px; border-top: 1px solid #D0D0D0; padding-top: 6px; }}
             """
         )
@@ -352,6 +397,7 @@ class MainWindow(QMainWindow):
         self._import_worker.moveToThread(self._import_thread)
         self._import_thread.started.connect(self._import_worker.run)
         self._import_worker.stage_changed.connect(self._on_stage)
+        self._import_worker.preview_ready.connect(self._on_preview)
         self._import_worker.completed.connect(self._on_completed)
         self._import_worker.failed.connect(self._on_failed)
         self._import_worker.done.connect(self._import_thread.quit)
@@ -376,17 +422,24 @@ class MainWindow(QMainWindow):
         self.status_label.setStyleSheet(f"color: {BLUE_DARK};")
         self.status_label.setText("识别完成")
         self.progress.setValue(100)
-        self.category_label.setText(prediction.category_name)
-        self.confidence_label.setText(f"分类置信度：{prediction.confidence * 100:.1f}%")
         self.probability_chart.set_probabilities(prediction.probabilities)
-        for class_id, bar in self.probability_bars.items():
-            probability = float(prediction.probabilities.get(class_id, 0.0))
-            bar.setValue(int(round(probability * 10_000)))
-            bar.setFormat(f"{probability * 100:.1f}%")
-        self.health_index_label.setText(f"{prediction.health_index:d} %")
-        self.health_bar.setValue(prediction.health_index)
-        self.health_level_label.setText(f"状态等级：{prediction.health_level}")
+        self.remaining_life_label.setText(f"{prediction.remaining_life_percent:.2f} %")
+        self.remaining_life_bar.setValue(int(round(prediction.remaining_life_percent * 100)))
+        self.remaining_life_bar.setFormat(f"{prediction.remaining_life_percent:.2f}%")
+        self.remaining_life_level_label.setText(f"状态等级：{prediction.remaining_life_level}")
         self.record_label.setText(f"记录目录：{record_dir}")
+
+    @Slot(object, object)
+    def _on_preview(self, samples: object, source_info: object) -> None:
+        values = np.asarray(samples, dtype=np.float32)
+        decoded_rate = int(getattr(source_info, "decoded_sample_rate", self.config.target_sample_rate))
+        self.audio_waveform.set_audio(values, decoded_rate)
+        duration = float(getattr(source_info, "duration_seconds", 0.0))
+        self.audio_info_label.setText(
+            f"{getattr(source_info, 'format', '--')}  |  {duration:.2f} 秒  |  "
+            f"{getattr(source_info, 'sample_rate', '--')} Hz  |  {getattr(source_info, 'channels', '--')} 声道\n"
+            f"模型输入：单声道 / {decoded_rate} Hz"
+        )
 
     @Slot(str, str)
     def _on_failed(self, message: str, details: str) -> None:

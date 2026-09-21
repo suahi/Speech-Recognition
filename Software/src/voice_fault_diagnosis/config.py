@@ -19,7 +19,6 @@ class BearingConfigError(ValueError):
 @dataclass(frozen=True)
 class BearingModelConfig:
     classifier_path: Path
-    health_index_path: Path
     feature_config_path: Path
     model_version: str
     labels: dict[str, str]
@@ -57,9 +56,8 @@ def load_bearing_config(path: str | Path = BEARING_CONFIG_PATH) -> BearingAppCon
         raise BearingConfigError("model.labels 中的中文名称不能为空。")
 
     classifier_path = _project_path(model_data.get("classifier_path"), "model.classifier_path")
-    health_index_path = _project_path(model_data.get("health_index_path"), "model.health_index_path")
     feature_config_path = _project_path(model_data.get("feature_config_path"), "model.feature_config_path")
-    missing = [str(item) for item in (classifier_path, health_index_path, feature_config_path) if not item.is_file()]
+    missing = [str(item) for item in (classifier_path, feature_config_path) if not item.is_file()]
     if missing:
         raise BearingConfigError("缺少轴承模型文件，请先运行训练命令：" + "，".join(missing))
     model_version = str(model_data.get("model_version", "")).strip()
@@ -71,7 +69,6 @@ def load_bearing_config(path: str | Path = BEARING_CONFIG_PATH) -> BearingAppCon
         segment_seconds=segment_seconds,
         model=BearingModelConfig(
             classifier_path=classifier_path,
-            health_index_path=health_index_path,
             feature_config_path=feature_config_path,
             model_version=model_version,
             labels=labels,

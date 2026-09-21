@@ -47,21 +47,6 @@
     "peak_factor",
     "crest_factor"
   ],
-  "health_bands": {
-    "healthy": [
-      76,
-      93
-    ],
-    "bearing_damage": [
-      31,
-      47
-    ],
-    "clearance": [
-      6,
-      18
-    ]
-  },
-  "health_disclaimer": "演示性健康指数，不能替代真实寿命小时数。",
   "random_seed": 20260920,
   "anomaly_feature_names": [
     "rms_mean",
@@ -84,9 +69,5 @@
     0.025335090919956563,
     0.7541463245630264
   ],
-  "anomaly_references": {
-    "healthy": 2.2939988162998484,
-    "bearing_damage": 9.154222785328372,
-    "clearance": 4.024439529246536
-  }
+  "healthy_anomaly_reference": 2.2939988162998484
 }
