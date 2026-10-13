@@ -60,6 +60,19 @@ def test_engine_returns_three_probabilities_and_deterministic_remaining_life() -
     assert round(first.remaining_life_percent, 2) == first.remaining_life_percent
     assert first.remaining_life_level in {"健康", "预警", "检修"}
     assert first.segment_count == 1
+    summary = first.metadata["feature_summary"]
+    assert set(summary) == {
+        "rms_mean",
+        "spectral_centroid_mean",
+        "spectral_flatness_mean",
+        "zero_crossing_rate_mean",
+        "amplitude_kurtosis",
+    }
+    assert all(np.isfinite(value) for value in summary.values())
+    assert first.metadata["total_degradation"] == pytest.approx(
+        0.72 * first.metadata["classification_risk"] + 0.28 * first.metadata["acoustic_anomaly_risk"]
+    )
+    assert first.metadata["feature_summary"] == second.metadata["feature_summary"]
 
 
 def test_remaining_life_algorithm_is_bounded_deterministic_and_uses_thresholds() -> None:

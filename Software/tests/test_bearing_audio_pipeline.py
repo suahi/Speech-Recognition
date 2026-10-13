@@ -98,5 +98,17 @@ def test_pipeline_decodes_once_archives_original_audio_and_result(tmp_path: Path
     assert len(previews[0][0]) == 32_000
     assert result["remaining_life_percent"] == prediction.remaining_life_percent
     assert result["metadata"]["remaining_life_algorithm_version"] == "acoustic_degradation_v1"
+    assert result["metadata"]["processing_duration_ms"] >= 0.0
+    assert metadata["model"]["processing_duration_ms"] == result["metadata"]["processing_duration_ms"]
+    assert set(result["metadata"]["feature_summary"]) == {
+        "rms_mean",
+        "spectral_centroid_mean",
+        "spectral_flatness_mean",
+        "zero_crossing_rate_mean",
+        "amplitude_kurtosis",
+    }
+    assert result["metadata"]["total_degradation"] == pytest.approx(
+        0.72 * result["metadata"]["classification_risk"] + 0.28 * result["metadata"]["acoustic_anomaly_risk"]
+    )
     assert "health_index_disclaimer" not in result
     assert "health_disclaimer" not in metadata["model"]

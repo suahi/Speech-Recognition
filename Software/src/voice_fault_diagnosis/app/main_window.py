@@ -49,6 +49,7 @@ MUTED = "#595959"
 BACKGROUND = "#F0F0F0"
 PANEL = "#F7F7F7"
 BORDER = "#B7B7B7"
+PROCESSING_STEPS = ("音频解码", "模型加载", "特征与分类", "寿命计算")
 
 
 class ProbabilityChartWidget(QWidget):
@@ -109,7 +110,7 @@ class AudioWaveformWidget(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("audio_waveform")
-        self.setMinimumHeight(220)
+        self.setFixedHeight(160)
         self._normalized_samples = np.zeros(0, dtype=np.float32)
         self._sample_rate = 16_000
         self._duration_seconds = 0.0
@@ -301,21 +302,25 @@ class MainWindow(QMainWindow):
         separator.setFixedHeight(1)
         outer.addWidget(separator)
 
-        top = QHBoxLayout()
-        top.setSpacing(10)
+        content = QGridLayout()
+        content.setHorizontalSpacing(10)
+        content.setVerticalSpacing(8)
         self.audio_group = self._build_audio_group()
         self.chart_group = self._build_chart_group()
-        top.addWidget(self.audio_group, 4)
-        top.addWidget(self.chart_group, 6)
-        outer.addLayout(top, 4)
-
-        bottom = QHBoxLayout()
-        bottom.setSpacing(10)
         self.waveform_group = self._build_waveform_group()
+        self.feature_group = self._build_feature_group()
         self.health_group = self._build_health_group()
-        bottom.addWidget(self.waveform_group, 4)
-        bottom.addWidget(self.health_group, 6)
-        outer.addLayout(bottom, 5)
+        content.addWidget(self.audio_group, 0, 0)
+        content.addWidget(self.chart_group, 0, 1)
+        content.addWidget(self.waveform_group, 1, 0)
+        content.addWidget(self.feature_group, 2, 0)
+        content.addWidget(self.health_group, 1, 1, 2, 1)
+        content.setColumnStretch(0, 4)
+        content.setColumnStretch(1, 6)
+        content.setRowStretch(0, 3)
+        content.setRowStretch(1, 0)
+        content.setRowStretch(2, 2)
+        outer.addLayout(content, 1)
 
     def _build_audio_group(self) -> QGroupBox:
         group = QGroupBox("音频读取")
@@ -334,10 +339,24 @@ class MainWindow(QMainWindow):
         self.file_path_label.setWordWrap(True)
         self.file_path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(self.file_path_label)
-        layout.addWidget(_field_title("格式 / 时长 / 采样率"))
-        self.audio_info_label = QLabel("--")
-        self.audio_info_label.setObjectName("audio_info")
-        layout.addWidget(self.audio_info_label)
+        self.audio_metric_labels: dict[str, QLabel] = {}
+        audio_metrics = QGridLayout()
+        audio_metrics.setHorizontalSpacing(6)
+        audio_metrics.setVerticalSpacing(5)
+        for index, (key, title) in enumerate(
+            (
+                ("format", "原始格式"),
+                ("duration", "总时长"),
+                ("sample_rate", "原始采样率"),
+                ("channels", "声道数"),
+                ("model_input", "模型输入"),
+                ("segment_duration", "分段时长"),
+            )
+        ):
+            card, value = _metric_card(title, f"audio_{key}_value")
+            self.audio_metric_labels[key] = value
+            audio_metrics.addWidget(card, index // 3, index % 3)
+        layout.addLayout(audio_metrics)
         layout.addWidget(_field_title("执行状态"))
         self.status_label = QLabel("就绪：请选择 M4A 或 WAV 音频。")
         self.status_label.setObjectName("status")
@@ -349,7 +368,19 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
         self.progress.setFormat("%p%")
         layout.addWidget(self.progress)
-        layout.addStretch(1)
+        layout.addWidget(_field_title("处理流程"))
+        self.processing_step_labels: list[QLabel] = []
+        steps = QGridLayout()
+        steps.setHorizontalSpacing(5)
+        for index, title in enumerate(PROCESSING_STEPS):
+            label = QLabel()
+            label.setObjectName("processing_step")
+            label.setAlignment(Qt.AlignCenter)
+            label.setMinimumHeight(35)
+            self.processing_step_labels.append(label)
+            steps.addWidget(label, 0, index)
+        layout.addLayout(steps)
+        self._update_processing_steps(0, active=False)
         return group
 
     def _build_chart_group(self) -> QGroupBox:
@@ -359,6 +390,20 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(13, 20, 13, 12)
         self.probability_chart = ProbabilityChartWidget(self.config.model.labels)
         layout.addWidget(self.probability_chart, 1)
+        self.classification_metric_labels: dict[str, QLabel] = {}
+        metrics = QGridLayout()
+        metrics.setHorizontalSpacing(6)
+        for index, (key, title) in enumerate(
+            (
+                ("category", "识别类别"),
+                ("confidence", "最高置信度"),
+                ("margin", "第一/第二差"),
+            )
+        ):
+            card, value = _metric_card(title, f"classification_{key}_value")
+            self.classification_metric_labels[key] = value
+            metrics.addWidget(card, 0, index)
+        layout.addLayout(metrics)
         return group
 
     def _build_waveform_group(self) -> QGroupBox:
@@ -368,6 +413,29 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(13, 20, 13, 13)
         self.audio_waveform = AudioWaveformWidget()
         layout.addWidget(self.audio_waveform, 1)
+        return group
+
+    def _build_feature_group(self) -> QGroupBox:
+        group = QGroupBox("声学特征摘要")
+        group.setObjectName("feature_group")
+        layout = QGridLayout(group)
+        layout.setContentsMargins(13, 20, 13, 13)
+        layout.setHorizontalSpacing(6)
+        layout.setVerticalSpacing(6)
+        self.feature_metric_labels: dict[str, QLabel] = {}
+        for index, (key, title) in enumerate(
+            (
+                ("segments", "分析片段数"),
+                ("rms", "RMS 能量"),
+                ("centroid", "频谱重心"),
+                ("flatness", "频谱平坦度"),
+                ("zcr", "过零率"),
+                ("kurtosis", "幅度峭度"),
+            )
+        ):
+            card, value = _metric_card(title, f"feature_{key}_value")
+            self.feature_metric_labels[key] = value
+            layout.addWidget(card, index // 3, index % 3)
         return group
 
     def _build_health_group(self) -> QGroupBox:
@@ -394,6 +462,26 @@ class MainWindow(QMainWindow):
         self.remaining_life_level_label.setObjectName("remaining_life_level")
         self.remaining_life_level_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.remaining_life_level_label)
+        layout.addWidget(_field_title("风险分解"))
+        self.risk_metric_labels: dict[str, QLabel] = {}
+        risk_metrics = QGridLayout()
+        risk_metrics.setHorizontalSpacing(6)
+        for index, (key, title) in enumerate(
+            (
+                ("classification", "分类风险"),
+                ("anomaly", "声学异常度"),
+                ("anomaly_risk", "异常风险"),
+                ("degradation", "综合退化度"),
+            )
+        ):
+            card, value = _metric_card(title, f"risk_{key}_value")
+            self.risk_metric_labels[key] = value
+            risk_metrics.addWidget(card, 0, index)
+        layout.addLayout(risk_metrics)
+        self.processing_summary_label = QLabel("模型版本：--  |  本次处理：--")
+        self.processing_summary_label.setObjectName("processing_summary")
+        self.processing_summary_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.processing_summary_label)
         self.record_label = QLabel("记录目录：--")
         self.record_label.setObjectName("record_path")
         self.record_label.setWordWrap(True)
@@ -414,14 +502,19 @@ class MainWindow(QMainWindow):
             QPushButton:hover {{ border-color: {BLUE}; }}
             QPushButton:pressed {{ background: #E5E5E5; }}
             QPushButton:disabled {{ background: #E0E0E0; color: #888888; border-color: #BEBEBE; }}
-            QLabel#file_path, QLabel#audio_info {{ color: {MUTED}; background: #FFFFFF; border: 1px solid #CDCDCD; padding: 5px; min-height: 18px; }}
+            QLabel#file_path {{ color: {MUTED}; background: #FFFFFF; border: 1px solid #CDCDCD; padding: 5px; min-height: 18px; }}
             QLabel#status {{ color: {BLUE_DARK}; font-weight: bold; min-height: 22px; }}
             QLabel[fieldTitle="true"] {{ color: #454545; font-size: 12px; font-weight: bold; }}
+            QWidget#metric_card {{ background: #FFFFFF; border: 1px solid #CDCDCD; border-radius: 0; }}
+            QLabel[metricTitle="true"] {{ color: #5A5A5A; font-size: 10px; padding: 2px 4px 0 4px; }}
+            QLabel[metricValue="true"] {{ color: {BLUE_DARK}; font-size: 13px; font-weight: bold; padding: 0 4px 2px 4px; }}
+            QLabel#processing_step {{ background: #FFFFFF; border: 1px solid #CDCDCD; border-radius: 0; color: #666666; font-size: 10px; padding: 1px; }}
             QProgressBar {{ min-height: 20px; border: 1px solid #A8A8A8; border-radius: 0; background: #FFFFFF; text-align: center; color: {TEXT}; }}
             QProgressBar::chunk {{ background: {BLUE}; }}
             QLabel#remaining_life_descriptor {{ color: #454545; font-size: 15px; font-weight: bold; }}
             QLabel#remaining_life {{ font-size: 44px; color: {BLUE_DARK}; font-weight: bold; min-height: 64px; }}
             QLabel#remaining_life_level {{ font-size: 17px; font-weight: bold; }}
+            QLabel#processing_summary {{ color: {MUTED}; background: #FFFFFF; border: 1px solid #CDCDCD; padding: 4px; font-size: 11px; }}
             QLabel#record_path {{ color: {MUTED}; font-size: 12px; border-top: 1px solid #D0D0D0; padding-top: 6px; }}
             """
         )
@@ -446,11 +539,10 @@ class MainWindow(QMainWindow):
         self._active_path = Path(source_path).resolve()
         self.read_button.setEnabled(False)
         self.file_path_label.setText(str(self._active_path))
-        self.audio_info_label.setText("正在读取音频参数…")
         self.status_label.setStyleSheet(f"color: {BLUE_DARK};")
         self.status_label.setText("正在准备识别任务…")
         self.progress.setValue(0)
-        self.record_label.setText("记录目录：任务完成后生成")
+        self._update_processing_steps(0, active=True)
 
         self._import_thread = QThread(self)
         self._import_worker = ImportWorker(self.config, self._active_path, self._engine, self._store)
@@ -470,19 +562,20 @@ class MainWindow(QMainWindow):
     def _on_stage(self, message: str, progress: int) -> None:
         self.status_label.setText(message)
         self.progress.setValue(max(self.progress.value(), int(progress)))
+        self._update_processing_steps(int(progress))
 
     @Slot(str, object)
     def _on_completed(self, record_dir: str, prediction) -> None:
         audio = dict(prediction.metadata.get("audio") or {})
-        self.audio_info_label.setText(
-            f"{audio.get('format', '--')}  |  {audio.get('duration_seconds', 0):.2f} 秒  |  "
-            f"{audio.get('sample_rate', '--')} Hz  |  {audio.get('channels', '--')} 声道\n"
-            f"模型输入：单声道 / {audio.get('decoded_sample_rate', self.config.target_sample_rate)} Hz"
-        )
+        self._set_audio_metrics(audio)
         self.status_label.setStyleSheet(f"color: {BLUE_DARK};")
         self.status_label.setText("识别完成")
         self.progress.setValue(100)
+        self._update_processing_steps(100)
         self.probability_chart.set_probabilities(prediction.probabilities)
+        self._set_classification_metrics(prediction)
+        self._set_feature_metrics(prediction)
+        self._set_risk_metrics(prediction)
         self.remaining_life_label.setText(f"{prediction.remaining_life_percent:.2f} %")
         self.remaining_life_bar.setValue(int(round(prediction.remaining_life_percent * 100)))
         self.remaining_life_bar.setFormat(f"{prediction.remaining_life_percent:.2f}%")
@@ -494,18 +587,14 @@ class MainWindow(QMainWindow):
         values = np.asarray(samples, dtype=np.float32)
         decoded_rate = int(getattr(source_info, "decoded_sample_rate", self.config.target_sample_rate))
         self.audio_waveform.set_audio(values, decoded_rate)
-        duration = float(getattr(source_info, "duration_seconds", 0.0))
-        self.audio_info_label.setText(
-            f"{getattr(source_info, 'format', '--')}  |  {duration:.2f} 秒  |  "
-            f"{getattr(source_info, 'sample_rate', '--')} Hz  |  {getattr(source_info, 'channels', '--')} 声道\n"
-            f"模型输入：单声道 / {decoded_rate} Hz"
-        )
+        self._set_audio_metrics(source_info)
 
     @Slot(str, str)
     def _on_failed(self, message: str, details: str) -> None:
+        failed_progress = self.progress.value()
         self.status_label.setStyleSheet(f"color: {ERROR_RED};")
         self.status_label.setText("识别失败")
-        self.audio_info_label.setText(message)
+        self._update_processing_steps(failed_progress, failed=True)
         self.progress.setValue(0)
         self._show_error(message, details)
         self.read_button.setEnabled(True)
@@ -523,11 +612,98 @@ class MainWindow(QMainWindow):
         self.audio_waveform.stop_playback(release_samples=True)
         super().closeEvent(event)
 
+    def _set_audio_metrics(self, source: object) -> None:
+        def get_value(name: str, default: object = "--") -> object:
+            return source.get(name, default) if isinstance(source, dict) else getattr(source, name, default)
+
+        decoded_rate = int(get_value("decoded_sample_rate", self.config.target_sample_rate))
+        self.audio_metric_labels["format"].setText(str(get_value("format")))
+        self.audio_metric_labels["duration"].setText(f"{float(get_value('duration_seconds', 0.0)):.2f} 秒")
+        self.audio_metric_labels["sample_rate"].setText(f"{int(get_value('sample_rate', 0))} Hz")
+        self.audio_metric_labels["channels"].setText(f"{int(get_value('channels', 0))} 声道")
+        self.audio_metric_labels["model_input"].setText(f"单声道 / {decoded_rate} Hz")
+        self.audio_metric_labels["segment_duration"].setText(f"{self.config.segment_seconds:.1f} 秒")
+
+    def _set_classification_metrics(self, prediction: object) -> None:
+        probabilities = dict(getattr(prediction, "probabilities", {}) or {})
+        ranked = sorted(probabilities.items(), key=lambda item: item[1], reverse=True)
+        margin = float(ranked[0][1] - ranked[1][1]) if len(ranked) > 1 else 0.0
+        self.classification_metric_labels["category"].setText(str(getattr(prediction, "category_name", "--")))
+        self.classification_metric_labels["confidence"].setText(f"{float(getattr(prediction, 'confidence', 0.0)) * 100:.2f}%")
+        self.classification_metric_labels["margin"].setText(f"{margin * 100:.2f}%")
+
+    def _set_feature_metrics(self, prediction: object) -> None:
+        metadata = dict(getattr(prediction, "metadata", {}) or {})
+        summary = dict(metadata.get("feature_summary") or {})
+        self.feature_metric_labels["segments"].setText(f"{int(getattr(prediction, 'segment_count', 0))} 段")
+        self.feature_metric_labels["rms"].setText(f"{float(summary.get('rms_mean', 0.0)):.5f}")
+        self.feature_metric_labels["centroid"].setText(f"{float(summary.get('spectral_centroid_mean', 0.0)):.1f} Hz")
+        self.feature_metric_labels["flatness"].setText(f"{float(summary.get('spectral_flatness_mean', 0.0)):.5f}")
+        self.feature_metric_labels["zcr"].setText(f"{float(summary.get('zero_crossing_rate_mean', 0.0)):.5f}")
+        self.feature_metric_labels["kurtosis"].setText(f"{float(summary.get('amplitude_kurtosis', 0.0)):.3f}")
+
+    def _set_risk_metrics(self, prediction: object) -> None:
+        metadata = dict(getattr(prediction, "metadata", {}) or {})
+        self.risk_metric_labels["classification"].setText(f"{float(metadata.get('classification_risk', 0.0)) * 100:.2f}%")
+        self.risk_metric_labels["anomaly"].setText(f"{float(metadata.get('acoustic_anomaly', 0.0)):.3f}")
+        self.risk_metric_labels["anomaly_risk"].setText(f"{float(metadata.get('acoustic_anomaly_risk', 0.0)) * 100:.2f}%")
+        self.risk_metric_labels["degradation"].setText(f"{float(metadata.get('total_degradation', 0.0)) * 100:.2f}%")
+        duration_ms = metadata.get("processing_duration_ms")
+        duration_text = "--" if duration_ms is None else f"{float(duration_ms):.1f} ms"
+        self.processing_summary_label.setText(
+            f"模型版本：{metadata.get('model_version', self.config.model.model_version)}  |  本次处理：{duration_text}"
+        )
+
+    def _update_processing_steps(self, progress: int, *, failed: bool = False, active: bool = True) -> None:
+        value = max(0, min(100, int(progress)))
+        if value >= 100:
+            active_index = len(PROCESSING_STEPS)
+        elif value >= 88:
+            active_index = 3
+        elif value >= 62:
+            active_index = 2
+        elif value >= 25:
+            active_index = 1
+        else:
+            active_index = 0
+        for index, (title, label) in enumerate(zip(PROCESSING_STEPS, self.processing_step_labels, strict=True)):
+            if not active:
+                state, color, border = "待执行", "#666666", "#CDCDCD"
+            elif failed and index == active_index:
+                state, color, border = "失败", ERROR_RED, ERROR_RED
+            elif index < active_index or value >= 100:
+                state, color, border = "完成", BLUE_DARK, BLUE
+            elif index == active_index:
+                state, color, border = "进行中", BLUE_DARK, BLUE
+            else:
+                state, color, border = "待执行", "#666666", "#CDCDCD"
+            label.setText(f"{index + 1}. {title}\n{state}")
+            label.setStyleSheet(f"color: {color}; border: 1px solid {border};")
+
 
 def _field_title(text: str) -> QLabel:
     label = QLabel(text)
     label.setProperty("fieldTitle", True)
     return label
+
+
+def _metric_card(title: str, value_object_name: str) -> tuple[QWidget, QLabel]:
+    """Create one compact industrial-style data card used by the dashboard."""
+
+    card = QWidget()
+    card.setObjectName("metric_card")
+    layout = QVBoxLayout(card)
+    layout.setContentsMargins(3, 2, 3, 2)
+    layout.setSpacing(0)
+    title_label = QLabel(title)
+    title_label.setProperty("metricTitle", True)
+    value_label = QLabel("--")
+    value_label.setObjectName(value_object_name)
+    value_label.setProperty("metricValue", True)
+    value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+    layout.addWidget(title_label)
+    layout.addWidget(value_label)
+    return card, value_label
 
 
 def _initial_audio_directory() -> Path:

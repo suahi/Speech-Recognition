@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
+from time import perf_counter
 from typing import Callable
 
 import numpy as np
@@ -30,6 +32,7 @@ def run_bearing_diagnosis(
     active_engine = engine or BearingDiagnosticEngine(config)
     active_store = store or LocalRecordStore()
     original_path = Path(source_path).resolve()
+    started_at = perf_counter()
     _report(on_stage, "正在解码音频…", 10)
     samples, source_info = load_audio(original_path, target_sample_rate=config.target_sample_rate)
     if on_preview is not None:
@@ -41,6 +44,13 @@ def run_bearing_diagnosis(
     _report(on_stage, "正在提取特征并进行分类…", 62)
     prediction = active_engine.predict_samples(samples, source_info=source_info, source_path=original_path)
     _report(on_stage, "正在计算算法估计剩余寿命…", 88)
+    prediction = replace(
+        prediction,
+        metadata={
+            **prediction.metadata,
+            "processing_duration_ms": round((perf_counter() - started_at) * 1_000.0, 1),
+        },
+    )
     active_store.complete_record(record_dir, prediction)
     _report(on_stage, "识别完成", 100)
     return record_dir, prediction

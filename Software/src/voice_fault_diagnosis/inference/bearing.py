@@ -108,6 +108,7 @@ class BearingDiagnosticEngine:
             anomaly,
             self._feature_config,
         )
+        total_degradation = _total_degradation(class_risk, anomaly_risk)
         top_k = sorted(probability_map.items(), key=lambda item: item[1], reverse=True)
         metadata = {
             **self.model_metadata,
@@ -119,7 +120,9 @@ class BearingDiagnosticEngine:
             "acoustic_anomaly": anomaly,
             "classification_risk": class_risk,
             "acoustic_anomaly_risk": anomaly_risk,
+            "total_degradation": total_degradation,
             "remaining_life_percent": remaining_life_percent,
+            "feature_summary": _feature_summary(feature_rows, feature_names),
             "top_k": [
                 {"class_id": item, "category_name": self.config.labels[item], "probability": value}
                 for item, value in top_k
@@ -243,7 +246,7 @@ def estimate_remaining_life(
         sum(max(0.0, float(probabilities.get(class_id, 0.0))) * weight for class_id, weight in CLASS_RISK_WEIGHTS.items())
     )
     acoustic_anomaly_risk = float(1.0 - np.exp(-max(0.0, float(anomaly)) / healthy_reference))
-    total_degradation = 0.72 * classification_risk + 0.28 * acoustic_anomaly_risk
+    total_degradation = _total_degradation(classification_risk, acoustic_anomaly_risk)
     remaining_life_percent = round(float(np.clip(100.0 * (1.0 - total_degradation), 3.0, 99.80)), 2)
     if remaining_life_percent >= 70.0:
         level = "健康"
@@ -252,6 +255,31 @@ def estimate_remaining_life(
     else:
         level = "检修"
     return remaining_life_percent, level, classification_risk, acoustic_anomaly_risk
+
+
+def _total_degradation(classification_risk: float, acoustic_anomaly_risk: float) -> float:
+    """Shared degradation calculation used by the life result and UI metadata."""
+
+    return float(0.72 * float(classification_risk) + 0.28 * float(acoustic_anomaly_risk))
+
+
+def _feature_summary(feature_rows: np.ndarray, feature_names: tuple[str, ...]) -> dict[str, float]:
+    """Expose a compact subset of the actual per-segment model features."""
+
+    selected_names = (
+        "rms_mean",
+        "spectral_centroid_mean",
+        "spectral_flatness_mean",
+        "zero_crossing_rate_mean",
+        "amplitude_kurtosis",
+    )
+    averages = np.mean(np.nan_to_num(feature_rows, nan=0.0, posinf=0.0, neginf=0.0), axis=0)
+    indexes = {name: index for index, name in enumerate(feature_names)}
+    return {
+        name: float(averages[indexes[name]])
+        for name in selected_names
+        if name in indexes
+    }
 
 
 def _finite_mean(values: np.ndarray) -> float:
